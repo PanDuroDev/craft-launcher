@@ -382,7 +382,7 @@ impl LauncherUi {
                                 .margin(egui::vec2(10.0, 0.0)),
                         );
                         #[cfg(windows)]
-                        if widgets::button(ui, tl!("Browse"), Kind::Secondary, 0.0).clicked() {
+                        if widgets::button(ui, tl!("Browse"), Kind::Primary, 0.0).clicked() {
                             host.start_browse_folder();
                         }
                     });
