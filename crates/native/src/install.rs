@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use artcraft_launcher_core::protocol::{CANCELLED, INSTALL_CANCELLED, JobPhase};
+use artcraft_launcher_core::protocol::{CANCELLED, INSTALL_CANCELLED, JobPhase, PAUSED};
 use artcraft_launcher_core::release::{self, Asset, Release};
 use artcraft_launcher_core::{CraftApp, InstallSource, Installed, PackageKind};
 
@@ -29,6 +29,7 @@ use crate::http::{Http, Stop, Transfer};
 use crate::manifest::Record;
 use crate::paths::Paths;
 use crate::process;
+use crate::zip_fetch::{self, ZipJob};
 
 /// What an install needs from the backend.
 pub struct Job<'a> {
@@ -58,7 +59,7 @@ pub fn install(
         return Err(format!("{} is running. Quit it, then try again.", app.name));
     }
     log::info!("{}: starting {} to {} ({})", app.name, if existing.is_some() { "update" } else { "install" }, release.version_label(), kind.label());
-    let file = download(release, asset, job)?;
+    let file = download(release, asset, kind, app.id, job)?;
     log::info!("{}: download ready ({}), running installer...", app.name, file.display());
     // Past this point the install can't be interrupted halfway.
     (job.phase)(JobPhase::Installing);
@@ -96,9 +97,14 @@ pub fn install(
         Err(e) => log::error!("{}: installation failed: {e}", app.name),
     }
     // A failed install keeps the download: the next try checks it against its published checksum
-    // again and skips the transfer.
+    // again and skips the transfer. A successful portable install keeps it instead as the next
+    // delta's base (one per app, beside the downloads); every other format deletes it.
     if result.is_ok() {
-        let _ = std::fs::remove_file(&file);
+        if kind == PackageKind::PortableZip {
+            zip_fetch::retain_installer(job.paths, app.id, &file);
+        } else {
+            let _ = std::fs::remove_file(&file);
+        }
     }
     // The system's own prompt was dismissed: the download itself wasn't cancelled.
     result.map_err(|e| if e == CANCELLED { INSTALL_CANCELLED.to_string() } else { e })
@@ -163,7 +169,7 @@ pub fn available_kinds() -> Vec<PackageKind> {
 /// Fetches `asset` into the download folder, checked against its published SHA-256: the feed's
 /// or GitHub's per-file digest, else the release's `SHA256SUMS.txt`. A release with neither is
 /// refused before anything is fetched: a file nothing vouches for is never installed (#90).
-pub(crate) fn download(release: &Release, asset: &Asset, job: &mut Job<'_>) -> Result<PathBuf, String> {
+pub(crate) fn download(release: &Release, asset: &Asset, kind: PackageKind, app_id: &str, job: &mut Job<'_>) -> Result<PathBuf, String> {
     if !release::valid_file_name(&asset.name) {
         return Err("the release has an unexpected file name".into());
     }
@@ -177,6 +183,10 @@ pub(crate) fn download(release: &Release, asset: &Asset, job: &mut Job<'_>) -> R
             asset.name
         ));
     };
+    if let Some(ready) = zip_delta_update(asset, kind, app_id, &sha, job)? {
+        (job.phase)(JobPhase::Verifying);
+        return Ok(ready);
+    }
     let dest = download_path(job.paths, asset);
     let phase = &mut *job.phase;
     job.http.download(&asset.url, &dest, asset.size, &sha, job.stop, &mut |t| match t {
@@ -185,6 +195,50 @@ pub(crate) fn download(release: &Release, asset: &Asset, job: &mut Job<'_>) -> R
     })?;
     (job.phase)(JobPhase::Verifying);
     Ok(dest)
+}
+
+/// Tries a portable-zip delta of the retained previous installer: `Ok(Some(path))` when
+/// only the changed entries travelled and the assembly verified; `Ok(None)` when a delta
+/// isn't applicable (other formats, no retained copy, unknown size), so the caller does the
+/// full download instead. Pause and cancel propagate as `Err` unchanged.
+fn zip_delta_update(asset: &Asset, kind: PackageKind, app_id: &str, sha: &str, job: &mut Job<'_>) -> Result<Option<PathBuf>, String> {
+    if kind != PackageKind::PortableZip || asset.size == 0 {
+        return Ok(None);
+    }
+    let Some(kept) = zip_fetch::find_kept(job.paths, app_id) else { return Ok(None) };
+    let tmp = job.paths.downloads().join(format!(".{}.delta.tmp", asset.name));
+    let result = zip_fetch::fetch_zip_delta(ZipJob {
+        http: job.http,
+        base_url: &asset.url,
+        file_size: asset.size,
+        old_path: &kept,
+        tmp_path: &tmp,
+        expected_sha256: sha,
+        stop: job.stop,
+        progress: &mut |done, total| (job.phase)(JobPhase::Downloading { done, total }),
+    });
+    match result {
+        Ok(()) => {
+            let dest = download_path(job.paths, asset);
+            match std::fs::rename(&tmp, &dest) {
+                Ok(()) => {
+                    log::info!("delta update assembled {}", asset.name);
+                    Ok(Some(dest))
+                }
+                Err(e) => {
+                    log::info!("delta update couldn't be put in place ({e}); falling back to a full download");
+                    let _ = std::fs::remove_file(&tmp);
+                    Ok(None)
+                }
+            }
+        }
+        Err(e) if e == PAUSED || e == CANCELLED => Err(e),
+        Err(e) => {
+            log::info!("delta update failed ({e}); falling back to a full download");
+            let _ = std::fs::remove_file(&tmp);
+            Ok(None)
+        }
+    }
 }
 
 /// The file's line in the release's `SHA256SUMS.txt`. `Ok(None)` only when the release really
