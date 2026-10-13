@@ -314,3 +314,7 @@ figcraft	Interface design and prototyping	界面设计与原型制作
 @msg	{name} is running. Quit it, then try again.	{name} 正在运行。请先退出，然后重试。
 	Installing on Windows	Installing on Windows
 	Installer (recommended)	Installer (recommended)
+	Install location	Install location
+	Default location	Default location
+	Next to the launcher	Next to the launcher
+	Custom folder	Custom folder

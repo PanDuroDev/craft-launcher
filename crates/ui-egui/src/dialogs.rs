@@ -1,5 +1,7 @@
 //! Modal dialogs: release notes, uninstall confirmation, settings.
 
+use std::path::PathBuf;
+
 use crate::i18n::fmt;
 use artcraft_launcher_core::protocol::Command;
 use artcraft_launcher_core::{Os, PackageKind};
@@ -332,6 +334,42 @@ impl LauncherUi {
             });
             self.settings.preferred_kinds = choice.into_iter().collect();
             ui.label(RichText::new(tl!("Updates always use the format an app was installed with.")).size(12.0).color(t.muted));
+            // The location only matters for portable installs: an MSI goes where the
+            // Windows Installer puts it, whatever is chosen here.
+            if choice == Some(PackageKind::PortableZip) {
+                use artcraft_launcher_core::protocol::InstallRoot;
+                let mut tag = match self.settings.install_root {
+                    InstallRoot::Default => 0,
+                    InstallRoot::NextToLauncher => 1,
+                    InstallRoot::Custom(_) => 2,
+                };
+                let mut custom = match &self.settings.install_root {
+                    InstallRoot::Custom(p) => p.display().to_string(),
+                    _ => String::new(),
+                };
+                row(ui, tl!("Install location"), 210.0, &mut |ui| {
+                    egui::ComboBox::from_id_salt("install-root")
+                        .selected_text(match tag {
+                            1 => tl!("Next to the launcher"),
+                            2 => tl!("Custom folder"),
+                            _ => tl!("Default location"),
+                        })
+                        .width(210.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut tag, 0, tl!("Default location"));
+                            ui.selectable_value(&mut tag, 1, tl!("Next to the launcher"));
+                            ui.selectable_value(&mut tag, 2, tl!("Custom folder"));
+                        });
+                });
+                if tag == 2 {
+                    ui.text_edit_singleline(&mut custom);
+                }
+                self.settings.install_root = match tag {
+                    1 => InstallRoot::NextToLauncher,
+                    2 => InstallRoot::Custom(PathBuf::from(custom)),
+                    _ => InstallRoot::Default,
+                };
+            }
         }
 
         if self.caps.manage_apps {

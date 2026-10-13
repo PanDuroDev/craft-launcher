@@ -252,7 +252,7 @@ pub mod windows {
             });
         }
         // A portable copy the launcher unpacked into its own per-user folder.
-        if let Some(dir) = crate::install::windows::portable_dir(app)
+        if let Some(dir) = crate::install::windows::portable_dir(app, &artcraft_launcher_core::protocol::InstallRoot::Default)
             && let Some(exe) = crate::install::windows::portable_exe(app, &dir)
             && let Some(exe_str) = exe.to_str()
         {

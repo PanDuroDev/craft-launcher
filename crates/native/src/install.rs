@@ -21,6 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
+use artcraft_launcher_core::protocol::InstallRoot;
 use artcraft_launcher_core::protocol::{CANCELLED, INSTALL_CANCELLED, JobPhase, PAUSED};
 use artcraft_launcher_core::release::{self, Asset, Release};
 use artcraft_launcher_core::{CraftApp, InstallSource, Installed, PackageKind};
@@ -37,6 +38,7 @@ pub struct Job<'a> {
     pub paths: &'a Paths,
     pub stop: &'a Stop,
     pub phase: &'a mut dyn FnMut(JobPhase),
+    pub install_root: InstallRoot,
 }
 
 /// Downloads and installs `asset` of `release`. Returns a record when the launcher owns the
@@ -71,12 +73,14 @@ pub fn install(
         #[cfg(windows)]
         PackageKind::Msi => windows::run_msi(&file, job.stop, &mut *job.phase).map(|_| None),
         #[cfg(windows)]
-        PackageKind::PortableZip => windows::install_portable(app, &file, job.stop).map(|exe| {
+        PackageKind::PortableZip => windows::install_portable(app, &file, &job.install_root, job.stop).map(|exe| {
             let dir = match exe.parent() {
                 Some(p) => p.to_path_buf(),
                 None => PathBuf::new(),
             };
-            Some(record(&version, kind, exe, windows::walk_files(&dir), false))
+            let mut rec = record(&version, kind, exe, windows::walk_files(&dir), false);
+            rec.root = Some(dir);
+            Some(rec)
         }),
         #[cfg(target_os = "linux")]
         PackageKind::Deb | PackageKind::Rpm | PackageKind::Flatpak => linux::install_package(kind, &file, job.stop, &mut *job.phase).map(|_| None),
@@ -117,7 +121,7 @@ pub fn download_path(paths: &Paths, asset: &Asset) -> PathBuf {
 
 #[allow(dead_code)]
 fn record(version: &str, kind: PackageKind, path: PathBuf, files: Vec<PathBuf>, needs_root: bool) -> Record {
-    Record { version: version.to_string(), kind, path, installed_at: crate::now(), files, needs_root }
+    Record { version: version.to_string(), kind, path, installed_at: crate::now(), files, needs_root, root: None }
 }
 
 /// The package format to install `app` with: the format of the copy that's there (an update
@@ -1288,11 +1292,23 @@ pub mod windows {
         Some(root.join("Programs"))
     }
 
+    /// Resolves an install root choice to a folder. `None` (no folder configured, a
+    /// relative custom path, no launcher exe to sit beside) means the install fails with a
+    /// clear message: an explicit location choice is never silently replaced.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn resolve_root(root: &InstallRoot) -> Option<PathBuf> {
+        match root {
+            InstallRoot::Default => programs_dir(),
+            InstallRoot::NextToLauncher => std::env::current_exe().ok()?.parent().map(Path::to_path_buf),
+            InstallRoot::Custom(dir) => (!dir.as_os_str().is_empty() && dir.is_absolute()).then(|| dir.clone()),
+        }
+    }
+
     /// Where `app`'s portable copy lives. Stable across versions (the zip's own top folder
     /// is versioned and is flattened away on install).
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn portable_dir(app: &CraftApp) -> Option<PathBuf> {
-        programs_dir().map(|root| root.join(app.name))
+    pub fn portable_dir(app: &CraftApp, root: &InstallRoot) -> Option<PathBuf> {
+        resolve_root(root).map(|base| base.join(app.name))
     }
 
     /// The app's exe inside its portable folder (`<stem>.exe`, current stem first).
@@ -1377,8 +1393,8 @@ pub mod windows {
     /// and writes a Start Menu shortcut (a shortcut failure only warns: the app runs fine
     /// without it). Returns the installed exe.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn install_portable(app: &CraftApp, file: &Path, stop: &Stop) -> Result<PathBuf, String> {
-        let dest = portable_dir(app).ok_or("no local app-data folder")?;
+    pub fn install_portable(app: &CraftApp, file: &Path, root: &InstallRoot, stop: &Stop) -> Result<PathBuf, String> {
+        let dest = portable_dir(app, root).ok_or("can't use that folder for installs: pick an absolute path that exists or can be created")?;
         let staging = dest.parent().map(|p| p.join(format!("{}.new", app.name))).ok_or("no local app-data folder")?;
         let _ = std::fs::remove_dir_all(&staging);
         powershell(&expand_script(file, &staging)).map_err(|e| format!("couldn't unpack the download ({e})"))?;
@@ -1406,21 +1422,23 @@ pub mod windows {
     }
 
     /// Removes a portable install the launcher owns: the Start Menu shortcut and the install
-    /// folder. Refuses anything outside `%LOCALAPPDATA%\Programs\<App>`, so a stray record
-    /// can never delete user files.
+    /// folder. Only the folder the install record pins (or, for records from before the
+    /// install location was choosable, the default one): anything else is left alone, so a
+    /// stray record can never delete user files.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn remove_portable(app: &CraftApp, record: &Record) -> Result<(), String> {
         if record.kind != PackageKind::PortableZip {
             return Err(format!("{} isn't a portable install", app.name));
         }
-        let dir = portable_dir(app).ok_or("no local app-data folder")?;
+        let allowed = record.root.clone().or_else(|| portable_dir(app, &InstallRoot::Default));
         let exe = PathBuf::from(&record.path);
-        if exe.parent() != Some(dir.as_path()) || !dir.is_dir() {
+        if allowed.as_deref() != exe.parent() || !allowed.as_deref().is_some_and(|d| d.is_dir()) {
             return Err(format!("{} isn't where its portable install should be; it was left alone", app.name));
         }
         if let Some(lnk) = shortcut_path(app) {
             let _ = std::fs::remove_file(&lnk);
         }
+        let dir = allowed.ok_or_else(|| format!("{} isn't where its portable install should be; it was left alone", app.name))?;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("couldn't remove {} ({e})", dir.display()))?;
         Ok(())
     }
@@ -1463,7 +1481,7 @@ mod tests {
         let mut phases = Vec::new();
         for _ in 0..2 {
             let mut phase = |p: JobPhase| phases.push(p);
-            let mut job = Job { http: &http, paths: &paths, stop: &Stop::default(), phase: &mut phase };
+            let mut job = Job { http: &http, paths: &paths, stop: &Stop::default(), phase: &mut phase, install_root: InstallRoot::default() };
             let err = install(app, &release, &asset, kind, None, None, &mut job).unwrap_err();
             assert!(err.contains("isn't supported"), "{err}");
             assert_eq!(std::fs::read(download_path(&paths, &asset)).unwrap(), body);
@@ -1487,7 +1505,7 @@ mod tests {
         let kind = if cfg!(windows) { PackageKind::Dmg } else { PackageKind::Msi };
         let mut phases = Vec::new();
         let mut phase = |p: JobPhase| phases.push(p);
-        let mut job = Job { http: &http, paths: &paths, stop: &Stop::default(), phase: &mut phase };
+        let mut job = Job { http: &http, paths: &paths, stop: &Stop::default(), phase: &mut phase, install_root: InstallRoot::default() };
         let err = install(app, &release, &asset, kind, None, None, &mut job).unwrap_err();
         assert!(err.contains("publishes no checksum"), "{err}");
         assert!(!download_path(&paths, &asset).exists());
@@ -1794,8 +1812,15 @@ mod tests {
     fn portable_updates_stay_portable() {
         use crate::manifest::Record;
         let inst = Installed { version: None, source: InstallSource::Launcher, location: String::new(), package: None };
-        let record =
-            Record { version: "0.5.0".into(), kind: PackageKind::PortableZip, path: "x".into(), installed_at: 1, files: vec![], needs_root: false };
+        let record = Record {
+            version: "0.5.0".into(),
+            kind: PackageKind::PortableZip,
+            path: "x".into(),
+            installed_at: 1,
+            files: vec![],
+            needs_root: false,
+            root: None,
+        };
         let kinds = choose_kinds(Some(&inst), Some(&record), &[]);
         if available_kinds().contains(&PackageKind::PortableZip) {
             assert_eq!(kinds, [PackageKind::PortableZip]);
@@ -1823,6 +1848,47 @@ mod tests {
         assert_eq!(windows::single_child_dir(dir.path()), Some(dir.path().join("v1")));
         std::fs::create_dir(dir.path().join("v2")).unwrap();
         assert_eq!(windows::single_child_dir(dir.path()), None);
+    }
+
+    #[test]
+    fn install_roots_resolve_safely() {
+        use artcraft_launcher_core::protocol::InstallRoot;
+        let def = windows::resolve_root(&InstallRoot::Default).unwrap();
+        assert!(def.ends_with("Programs"), "{}", def.display());
+        let exe_dir = windows::resolve_root(&InstallRoot::NextToLauncher).unwrap();
+        assert!(exe_dir.is_dir());
+        let custom = std::env::temp_dir().join("craft-root-test");
+        assert_eq!(windows::resolve_root(&InstallRoot::Custom(custom.clone())), Some(custom));
+        assert_eq!(windows::resolve_root(&InstallRoot::Custom(PathBuf::from("relative/dir"))), None);
+        assert_eq!(windows::resolve_root(&InstallRoot::Custom(PathBuf::new())), None);
+    }
+
+    #[test]
+    fn portable_removal_stays_inside_its_record() {
+        use crate::manifest::Record;
+        let app = CraftApp::by_id("wordcraft").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("WordCraft");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("wordcraft.exe"), "x").unwrap();
+        let record = Record {
+            version: "0.5.0".into(),
+            kind: PackageKind::PortableZip,
+            path: home.join("wordcraft.exe"),
+            installed_at: 1,
+            files: vec![],
+            needs_root: false,
+            root: Some(home.clone()),
+        };
+        windows::remove_portable(app, &record).unwrap();
+        assert!(!home.exists());
+        // A record pointing elsewhere never deletes user files.
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("wordcraft.exe"), "x").unwrap();
+        let stray = Record { path: elsewhere.join("wordcraft.exe"), ..record.clone() };
+        assert!(windows::remove_portable(app, &stray).is_err());
+        assert!(elsewhere.exists());
     }
 
     #[cfg(target_os = "linux")]
