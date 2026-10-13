@@ -1323,13 +1323,13 @@ pub mod windows {
         std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join(r"Microsoft\Windows\Start Menu\Programs").join(format!("{}.lnk", app.name)))
     }
 
-    /// Folder-picker script: the modern file-manager dialog in folder mode, owned by a small
-    /// topmost taskbar window so it can never hide behind other apps and strand the user (an
-    /// orphan dialog did exactly that). Prints the chosen folder, or nothing when cancelled.
-    /// No new dependency.
+    /// Folder-picker script: the modern file-manager dialog in folder mode, owned by an
+    /// invisible topmost window (no extra window, no taskbar entry), so it can never hide
+    /// behind other apps and strand the user. Prints the chosen folder, or nothing when
+    /// cancelled. No new dependency.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn browse_script() -> String {
-        "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.Form; $f.TopMost = $true; $f.ShowInTaskbar = $true; $f.Text = 'Choose folder'; $f.Show(); $f.Activate(); $d = New-Object System.Windows.Forms.OpenFileDialog; $d.ValidateNames = $false; $d.CheckFileExists = $false; $d.CheckPathExists = $true; $d.FileName = 'Folder Selection.'; if ($d.ShowDialog($f) -eq 'OK') { Split-Path $d.FileName }; $f.Close()".to_string()
+        "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.Form; $f.TopMost = $true; $f.ShowInTaskbar = $false; $f.Opacity = 0; $f.Show(); $d = New-Object System.Windows.Forms.OpenFileDialog; $d.ValidateNames = $false; $d.CheckFileExists = $false; $d.CheckPathExists = $true; $d.FileName = 'Folder Selection.'; if ($d.ShowDialog($f) -eq 'OK') { Split-Path $d.FileName }; $f.Close()".to_string()
     }
 
     /// Keeps a picker answer only when it names a real folder.
@@ -1876,8 +1876,7 @@ mod tests {
     #[test]
     fn folder_picker_answers_only_real_folders() {
         assert!(windows::browse_script().contains("OpenFileDialog"));
-        assert!(windows::browse_script().contains("ShowDialog"));
-        assert!(windows::browse_script().contains("ShowInTaskbar"));
+        assert!(windows::browse_script().contains("ShowDialog($f)"));
         assert!(!windows::browse_script().contains("FolderBrowserDialog"));
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(windows::parse_browse_output(&format!("{}\r\n", dir.path().display())), Some(dir.path().to_path_buf()));
