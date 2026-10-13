@@ -69,6 +69,14 @@ pub fn install(
         PackageKind::Dmg => macos::install_dmg(app, &file, existing, job.paths, &macos::Expect::release(release)).map(|_| None),
         #[cfg(windows)]
         PackageKind::Msi => windows::run_msi(&file, job.stop, &mut *job.phase).map(|_| None),
+        #[cfg(windows)]
+        PackageKind::PortableZip => windows::install_portable(app, &file, job.stop).map(|exe| {
+            let dir = match exe.parent() {
+                Some(p) => p.to_path_buf(),
+                None => PathBuf::new(),
+            };
+            Some(record(&version, kind, exe, windows::walk_files(&dir), false))
+        }),
         #[cfg(target_os = "linux")]
         PackageKind::Deb | PackageKind::Rpm | PackageKind::Flatpak => linux::install_package(kind, &file, job.stop, &mut *job.phase).map(|_| None),
         #[cfg(target_os = "linux")]
@@ -137,12 +145,13 @@ pub fn choose_kinds(existing: Option<&Installed>, record: Option<&Record>, prefe
     kinds
 }
 
-/// Package formats this machine can install, best first.
+/// Package formats this machine can install, best first. Windows offers the system
+/// installer and, for users who prefer no admin prompts, the portable zip.
 pub fn available_kinds() -> Vec<PackageKind> {
     #[cfg(target_os = "macos")]
     return vec![PackageKind::Dmg];
     #[cfg(windows)]
-    return vec![PackageKind::Msi];
+    return vec![PackageKind::Msi, PackageKind::PortableZip];
     #[cfg(target_os = "linux")]
     return linux::available_kinds();
     #[cfg(target_os = "freebsd")]
@@ -232,6 +241,11 @@ pub fn uninstall(
     match installed.source {
         #[cfg(windows)]
         InstallSource::Msi => windows::uninstall_msi(app, stop, phase),
+        #[cfg(windows)]
+        InstallSource::Launcher => match record {
+            Some(r) if r.kind == PackageKind::PortableZip => windows::remove_portable(app, r),
+            _ => Err(format!("{} can't be removed from here", installed.source.label())),
+        },
         #[cfg(target_os = "macos")]
         InstallSource::MacApp | InstallSource::Launcher => macos::move_to_trash(&path),
         #[cfg(target_os = "linux")]
@@ -1211,6 +1225,151 @@ pub mod windows {
             Ok(())
         })
     }
+
+    /// Portable installs live here, per user with no admin rights (where the per-user MSI
+    /// puts the launcher itself): `%LOCALAPPDATA%\Programs`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn programs_dir() -> Option<PathBuf> {
+        let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(dirs::data_local_dir)?;
+        Some(root.join("Programs"))
+    }
+
+    /// Where `app`'s portable copy lives. Stable across versions (the zip's own top folder
+    /// is versioned and is flattened away on install).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn portable_dir(app: &CraftApp) -> Option<PathBuf> {
+        programs_dir().map(|root| root.join(app.name))
+    }
+
+    /// The app's exe inside its portable folder (`<stem>.exe`, current stem first).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn portable_exe(app: &CraftApp, dir: &Path) -> Option<PathBuf> {
+        app.stems().map(|s| dir.join(format!("{s}.exe"))).find(|p| p.is_file())
+    }
+
+    /// The Start Menu shortcut for a portable install.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn shortcut_path(app: &CraftApp) -> Option<PathBuf> {
+        std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join(r"Microsoft\Windows\Start Menu\Programs").join(format!("{}.lnk", app.name)))
+    }
+
+    /// A PowerShell single-quoted literal.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn ps_quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "''"))
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn powershell(script: &str) -> Result<std::process::ExitStatus, String> {
+        process::command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script])
+            .status()
+            .map_err(|e| format!("couldn't run PowerShell ({e})"))
+    }
+
+    /// `Expand-Archive` script: unpacks `zip` into a fresh `dest`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn expand_script(zip: &Path, dest: &Path) -> String {
+        format!(
+            "Remove-Item -LiteralPath {} -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path {} -Force | Out-Null; Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
+            ps_quote(dest),
+            ps_quote(dest),
+            ps_quote(zip),
+            ps_quote(dest)
+        )
+    }
+
+    /// Shortcut-writing script (WScript.Shell, built into Windows: no new dependency).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn shortcut_script(lnk: &Path, exe: &Path, dir: &Path) -> String {
+        format!(
+            "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut({lnk}); $sc.TargetPath = {exe}; $sc.WorkingDirectory = {dir}; $sc.Save()",
+            lnk = ps_quote(lnk),
+            exe = ps_quote(exe),
+            dir = ps_quote(dir)
+        )
+    }
+
+    /// Every file under `root`, relative to it (mirrors `tree::files`, which lives in the
+    /// unix-gated `tree` module).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn walk_files(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(rel) = p.strip_prefix(root) {
+                    out.push(rel.to_path_buf());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The single top-level folder of an unpacked portable zip, if it has exactly one.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn single_child_dir(dir: &Path) -> Option<PathBuf> {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
+        if dirs.len() == 1 { dirs.pop() } else { None }
+    }
+
+    /// Installs a portable zip. New install path (MSI stays the default): unpacks to staging,
+    /// flattens the zip's single versioned top folder away, swaps the result into
+    /// `%LOCALAPPDATA%\Programs\<App>` (the new copy fully in place before the old one goes),
+    /// and writes a Start Menu shortcut (a shortcut failure only warns: the app runs fine
+    /// without it). Returns the installed exe.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn install_portable(app: &CraftApp, file: &Path, stop: &Stop) -> Result<PathBuf, String> {
+        let dest = portable_dir(app).ok_or("no local app-data folder")?;
+        let staging = dest.parent().map(|p| p.join(format!("{}.new", app.name))).ok_or("no local app-data folder")?;
+        let _ = std::fs::remove_dir_all(&staging);
+        powershell(&expand_script(file, &staging)).map_err(|e| format!("couldn't unpack the download ({e})"))?;
+        stop.check()?;
+        // The zip holds one versioned top folder; the install dir stays stable across updates.
+        if let Some(top) = single_child_dir(&staging) {
+            for child in std::fs::read_dir(&top).map_err(|e| format!("couldn't read the unpacked download ({e})"))?.flatten() {
+                let to = staging.join(child.file_name());
+                std::fs::rename(child.path(), &to).map_err(|e| format!("couldn't arrange the unpacked download ({e})"))?;
+            }
+            std::fs::remove_dir_all(&top).map_err(|e| format!("couldn't arrange the unpacked download ({e})"))?;
+        }
+        let staged_exe = portable_exe(app, &staging).ok_or_else(|| format!("the download has no {} executable", app.name))?;
+        let rel = staged_exe.strip_prefix(&staging).map_err(|_| "the download escaped its folder".to_string())?.to_path_buf();
+        stop.check()?;
+        super::swap_into_place(&staging, &dest)?;
+        let exe = dest.join(&rel);
+        if let Some(lnk) = shortcut_path(app) {
+            let dir = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| dest.clone());
+            if powershell(&shortcut_script(&lnk, &exe, &dir)).is_err() {
+                log::warn!("couldn't write the Start Menu shortcut; {} still runs from {}", app.name, exe.display());
+            }
+        }
+        Ok(exe)
+    }
+
+    /// Removes a portable install the launcher owns: the Start Menu shortcut and the install
+    /// folder. Refuses anything outside `%LOCALAPPDATA%\Programs\<App>`, so a stray record
+    /// can never delete user files.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn remove_portable(app: &CraftApp, record: &Record) -> Result<(), String> {
+        if record.kind != PackageKind::PortableZip {
+            return Err(format!("{} isn't a portable install", app.name));
+        }
+        let dir = portable_dir(app).ok_or("no local app-data folder")?;
+        let exe = PathBuf::from(&record.path);
+        if exe.parent() != Some(dir.as_path()) || !dir.is_dir() {
+            return Err(format!("{} isn't where its portable install should be; it was left alone", app.name));
+        }
+        if let Some(lnk) = shortcut_path(app) {
+            let _ = std::fs::remove_file(&lnk);
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("couldn't remove {} ({e})", dir.display()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1567,6 +1726,49 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(choose_kinds(Some(&inst(InstallSource::AppImage)), None, &[]), [PackageKind::AppImage]);
         let _ = inst;
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_offers_the_installer_first_and_portable_second() {
+        let kinds = available_kinds();
+        assert_eq!(kinds.first(), Some(&PackageKind::Msi));
+        assert!(kinds.contains(&PackageKind::PortableZip));
+    }
+
+    #[test]
+    fn portable_updates_stay_portable() {
+        use crate::manifest::Record;
+        let inst = Installed { version: None, source: InstallSource::Launcher, location: String::new(), package: None };
+        let record =
+            Record { version: "0.5.0".into(), kind: PackageKind::PortableZip, path: "x".into(), installed_at: 1, files: vec![], needs_root: false };
+        let kinds = choose_kinds(Some(&inst), Some(&record), &[]);
+        if available_kinds().contains(&PackageKind::PortableZip) {
+            assert_eq!(kinds, [PackageKind::PortableZip]);
+        }
+    }
+
+    #[test]
+    fn powershell_quoting_survives_apostrophes() {
+        let quoted = windows::ps_quote(Path::new(r"C:\Users\O'Brien\app.exe"));
+        assert_eq!(quoted, "'C:\\Users\\O''Brien\\app.exe'");
+    }
+
+    #[test]
+    fn shortcut_script_points_at_the_exe() {
+        let script = windows::shortcut_script(Path::new("C:\\s\\A.lnk"), Path::new("C:\\p\\a.exe"), Path::new("C:\\p"));
+        assert!(script.contains("'C:\\s\\A.lnk'") && script.contains("'C:\\p\\a.exe'"), "{script}");
+    }
+
+    #[test]
+    fn single_child_dir_needs_exactly_one_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(windows::single_child_dir(dir.path()), None);
+        std::fs::create_dir(dir.path().join("v1")).unwrap();
+        std::fs::write(dir.path().join("note.txt"), "x").unwrap();
+        assert_eq!(windows::single_child_dir(dir.path()), Some(dir.path().join("v1")));
+        std::fs::create_dir(dir.path().join("v2")).unwrap();
+        assert_eq!(windows::single_child_dir(dir.path()), None);
     }
 
     #[cfg(target_os = "linux")]
