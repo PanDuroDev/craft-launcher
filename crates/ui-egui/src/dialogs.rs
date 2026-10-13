@@ -373,7 +373,7 @@ impl LauncherUi {
                     ui.horizontal(|ui| {
                         let browse = widgets::button_width(ui, tl!("Browse"), 0.0);
                         let field = (ui.available_width() - browse - ui.spacing().item_spacing.x).max(60.0);
-                        ui.add(egui::TextEdit::singleline(&mut custom).desired_width(field).hint_text(r"F:\CraftApps"));
+                        ui.add_sized(egui::vec2(field, theme::CONTROL_H), egui::TextEdit::singleline(&mut custom).hint_text(r"F:\CraftApps"));
                         #[cfg(windows)]
                         if widgets::button(ui, tl!("Browse"), Kind::Secondary, 0.0).clicked() {
                             host.start_browse_folder();
