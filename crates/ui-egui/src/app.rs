@@ -60,9 +60,13 @@ pub trait Host {
     }
     /// Quit the launcher for real (not just hide to the tray).
     fn quit(&mut self) {}
-    /// Asks the OS for a folder (a native picker where supported): `Some` directory, or `None`
-    /// when cancelled, unsupported or failed.
-    fn browse_folder(&mut self) -> Option<std::path::PathBuf> {
+    /// Opens an OS folder picker. Returns immediately: the picker runs off the UI thread so a
+    /// hidden dialog can never hang the app; [`Host::poll_browse_folder`] collects the answer.
+    /// Does nothing where unsupported. A second call while one runs is ignored.
+    fn start_browse_folder(&mut self) {}
+    /// A finished picker, if any: `Some(dir)` chosen, `Some(None)` cancelled or failed, `None`
+    /// when nothing is pending. Each answer is reported once.
+    fn poll_browse_folder(&mut self) -> Option<Option<std::path::PathBuf>> {
         None
     }
 }

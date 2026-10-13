@@ -384,6 +384,7 @@ fn claim_notification_identity() -> &'static Result<(), String> {
 struct DesktopHost {
     tray: bool,
     quit: bool,
+    browse_thread: Option<std::thread::JoinHandle<Option<std::path::PathBuf>>>,
 }
 
 impl Host for DesktopHost {
@@ -433,15 +434,18 @@ impl Host for DesktopHost {
         self.quit = true;
     }
 
-    fn browse_folder(&mut self) -> Option<std::path::PathBuf> {
-        #[cfg(windows)]
-        {
-            artcraft_launcher_native::install::windows::browse_for_folder()
+    fn start_browse_folder(&mut self) {
+        if self.browse_thread.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
         }
-        #[cfg(not(windows))]
-        {
-            None
+        self.browse_thread = Some(std::thread::spawn(artcraft_launcher_native::install::windows::browse_for_folder));
+    }
+
+    fn poll_browse_folder(&mut self) -> Option<Option<std::path::PathBuf>> {
+        if !self.browse_thread.as_ref().is_some_and(|h| h.is_finished()) {
+            return None;
         }
+        self.browse_thread.take().map(|h| h.join().ok().flatten())
     }
 }
 
@@ -481,7 +485,7 @@ impl Launcher {
             system_theme: system_theme::Monitor::default(),
             ui: LauncherUi::new(&windowless, backend, Settings::default()),
             tray: None,
-            host: DesktopHost { tray: false, quit: false },
+            host: DesktopHost { tray: false, quit: false, browse_thread: None },
             starts,
             windowless,
             run_again,

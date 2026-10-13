@@ -362,14 +362,21 @@ impl LauncherUi {
                         });
                 });
                 if tag == 2 {
+                    // A finished picker applies once; it ran off the UI thread, so even a
+                    // hidden dialog can never hang the app.
+                    if let Some(picked) = host.poll_browse_folder()
+                        && let Some(dir) = picked
+                    {
+                        custom = dir.display().to_string();
+                        self.settings.install_root = InstallRoot::Custom(dir);
+                    }
                     ui.horizontal(|ui| {
-                        let field = (ui.available_width() - 90.0).max(60.0);
-                        ui.add(egui::TextEdit::singleline(&mut custom).desired_width(field));
+                        let browse = widgets::button_width(ui, tl!("Browse"), 0.0);
+                        let field = (ui.available_width() - browse - ui.spacing().item_spacing.x).max(60.0);
+                        ui.add(egui::TextEdit::singleline(&mut custom).desired_width(field).hint_text(r"F:\CraftApps"));
                         #[cfg(windows)]
-                        if widgets::button(ui, tl!("Browse"), Kind::Secondary, 0.0).clicked()
-                            && let Some(dir) = host.browse_folder()
-                        {
-                            custom = dir.display().to_string();
+                        if widgets::button(ui, tl!("Browse"), Kind::Secondary, 0.0).clicked() {
+                            host.start_browse_folder();
                         }
                     });
                 }
