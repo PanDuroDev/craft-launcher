@@ -432,6 +432,17 @@ impl Host for DesktopHost {
     fn quit(&mut self) {
         self.quit = true;
     }
+
+    fn browse_folder(&mut self) -> Option<std::path::PathBuf> {
+        #[cfg(windows)]
+        {
+            artcraft_launcher_native::install::windows::browse_for_folder()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
 }
 
 /// Everything that outlives a window: the UI state and its backend, the tray icon, and the work

@@ -1323,6 +1323,38 @@ pub mod windows {
         std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join(r"Microsoft\Windows\Start Menu\Programs").join(format!("{}.lnk", app.name)))
     }
 
+    /// Folder-picker script (a plain Windows dialog, no new dependency): prints the chosen
+    /// folder, or nothing when cancelled.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn browse_script() -> String {
+        "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }".to_string()
+    }
+
+    /// Keeps a picker answer only when it names a real folder.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn parse_browse_output(out: &str) -> Option<PathBuf> {
+        let path = PathBuf::from(out.trim());
+        (!out.trim().is_empty() && path.is_dir()).then_some(path)
+    }
+
+    /// Asks Windows for a folder. Blocks while the picker is open (like the MSI installer
+    /// does); `None` anywhere else or on cancel.
+    pub fn browse_for_folder() -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            crate::process::capture(
+                "powershell.exe",
+                &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", &browse_script()],
+                std::time::Duration::from_secs(600),
+            )
+            .and_then(|out| parse_browse_output(&out))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     /// A PowerShell single-quoted literal.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn ps_quote(path: &Path) -> String {
@@ -1837,6 +1869,17 @@ mod tests {
     fn shortcut_script_points_at_the_exe() {
         let script = windows::shortcut_script(Path::new("C:\\s\\A.lnk"), Path::new("C:\\p\\a.exe"), Path::new("C:\\p"));
         assert!(script.contains("'C:\\s\\A.lnk'") && script.contains("'C:\\p\\a.exe'"), "{script}");
+    }
+
+    #[test]
+    fn folder_picker_answers_only_real_folders() {
+        assert!(windows::browse_script().contains("FolderBrowserDialog"));
+        assert!(windows::browse_script().contains("ShowDialog"));
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(windows::parse_browse_output(&format!("{}\r\n", dir.path().display())), Some(dir.path().to_path_buf()));
+        assert_eq!(windows::parse_browse_output(""), None);
+        assert_eq!(windows::parse_browse_output("   \r\n"), None);
+        assert_eq!(windows::parse_browse_output("C:\\no\\such\\dir"), None);
     }
 
     #[test]

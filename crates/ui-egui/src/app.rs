@@ -60,6 +60,11 @@ pub trait Host {
     }
     /// Quit the launcher for real (not just hide to the tray).
     fn quit(&mut self) {}
+    /// Asks the OS for a folder (a native picker where supported): `Some` directory, or `None`
+    /// when cancelled, unsupported or failed.
+    fn browse_folder(&mut self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 pub(crate) struct Toast {

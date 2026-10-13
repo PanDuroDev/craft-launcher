@@ -362,7 +362,16 @@ impl LauncherUi {
                         });
                 });
                 if tag == 2 {
-                    ui.text_edit_singleline(&mut custom);
+                    ui.horizontal(|ui| {
+                        let field = (ui.available_width() - 90.0).max(60.0);
+                        ui.add(egui::TextEdit::singleline(&mut custom).desired_width(field));
+                        #[cfg(windows)]
+                        if widgets::button(ui, tl!("Browse"), Kind::Secondary, 0.0).clicked()
+                            && let Some(dir) = host.browse_folder()
+                        {
+                            custom = dir.display().to_string();
+                        }
+                    });
                 }
                 self.settings.install_root = match tag {
                     1 => InstallRoot::NextToLauncher,
