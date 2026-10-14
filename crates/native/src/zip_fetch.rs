@@ -67,14 +67,28 @@ fn read_at(path: &Path, off: u64, len: u64) -> Result<Vec<u8>, String> {
     if len > MAX_READ {
         return Err("range too large".into());
     }
-    let mut buf = Vec::new();
     let mut file = File::open(path).map_err(|e| format!("couldn't read {} ({e})", path.display()))?;
     file.seek(SeekFrom::Start(off)).map_err(|e| format!("couldn't read {} ({e})", path.display()))?;
+    let mut buf = Vec::new();
     file.take(len).read_to_end(&mut buf).map_err(|e| format!("couldn't read {} ({e})", path.display()))?;
     if buf.len() as u64 != len {
         return Err(format!("short read of {}", path.display()));
     }
     Ok(buf)
+}
+
+/// A zip's validated Central Directory, read from disk: every entry is name-safe (no
+/// traversal, absolute paths, streams, reserved names, duplicates, symlinks or bad
+/// methods) before anything is unpacked, so a hostile or broken zip fails before it can
+/// write outside its folder.
+pub(crate) fn read_local_cd(path: &Path) -> Result<Vec<zip_cd::Entry>, String> {
+    let len = std::fs::metadata(path).map_err(|e| format!("couldn't read {} ({e})", path.display()))?.len();
+    let tail = read_at(path, len.saturating_sub(TAIL_MAX), len.min(TAIL_MAX))?;
+    let eocd = zip_cd::find_eocd(&tail, len)?;
+    let cd_bytes = read_at(path, eocd.cd_offset, eocd.cd_size)?;
+    let entries = zip_cd::parse_cd(&cd_bytes, eocd.count)?;
+    zip_cd::validate_entries(&entries)?;
+    Ok(entries)
 }
 
 /// Where `old` keeps the previous installer for deltas: a subfolder of the downloads folder.
@@ -130,6 +144,8 @@ pub fn fetch_zip_delta(job: ZipJob<'_>) -> Result<(), String> {
     let eocd = zip_cd::find_eocd(&tail, file_size)?;
     let cd_bytes = retrying(stop, || http.get_range(base_url, eocd.cd_offset, eocd.cd_offset + eocd.cd_size - 1))?;
     let new_cd = zip_cd::parse_cd(&cd_bytes, eocd.count)?;
+    // Fail fast before fetching entry data: a hostile directory never becomes ranges.
+    zip_cd::validate_entries(&new_cd)?;
     // The old directory, entirely from disk.
     let old_len = std::fs::metadata(old_path).map_err(|e| format!("couldn't read {} ({e})", old_path.display()))?.len();
     let old_tail = read_at(old_path, old_len.saturating_sub(TAIL_MAX), old_len.min(TAIL_MAX))?;
@@ -234,5 +250,75 @@ mod tests {
         assert!(read_at(&f, 4, 3).is_err(), "past the end");
         assert!(read_at(&f, 0, MAX_READ + 1).is_err(), "capped");
         assert!(read_at(&dir.path().join("missing"), 0, 1).is_err());
+    }
+
+    /// A minimal stored-entry zip, built by hand: local file, central directory, end record.
+    fn stored_zip(name: &str, data: &[u8]) -> Vec<u8> {
+        fn u16le(v: u16, out: &mut Vec<u8>) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        fn u32le(v: u32, out: &mut Vec<u8>) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut zip = vec![];
+        zip.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04]);
+        u16le(20, &mut zip);
+        u16le(0, &mut zip);
+        u16le(0, &mut zip);
+        u16le(0, &mut zip);
+        u16le(0, &mut zip);
+        u32le(0, &mut zip);
+        u32le(data.len() as u32, &mut zip);
+        u32le(data.len() as u32, &mut zip);
+        u16le(name.len() as u16, &mut zip);
+        u16le(0, &mut zip);
+        zip.extend_from_slice(name.as_bytes());
+        let local_len = zip.len() as u64;
+        zip.extend_from_slice(data);
+        let cd_off = zip.len() as u64;
+        zip.extend_from_slice(&[0x50, 0x4b, 0x01, 0x02]);
+        u16le(20, &mut zip);
+        u16le(20, &mut zip);
+        u16le(0, &mut zip);
+        u16le(0, &mut zip);
+        u16le(0, &mut zip);
+        u16le(0, &mut zip);
+        u32le(0, &mut zip);
+        u32le(data.len() as u32, &mut zip);
+        u32le(data.len() as u32, &mut zip);
+        u16le(name.len() as u16, &mut zip);
+        for _ in 0..4 {
+            u16le(0, &mut zip);
+        }
+        u32le(0, &mut zip);
+        u32le(0, &mut zip);
+        zip.extend_from_slice(name.as_bytes());
+        let cd_len = zip.len() as u64 - cd_off;
+        zip.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06]);
+        for _ in 0..2 {
+            u16le(0, &mut zip);
+        }
+        u16le(1, &mut zip);
+        u16le(1, &mut zip);
+        u32le(cd_len as u32, &mut zip);
+        u32le(cd_off as u32, &mut zip);
+        u16le(0, &mut zip);
+        assert_eq!(local_len, 30 + name.len() as u64, "local header math");
+        zip
+    }
+
+    #[test]
+    fn local_directories_validate_before_unpack() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.zip");
+        std::fs::write(&good, stored_zip("app/file.txt", b"hi")).unwrap();
+        let entries = read_local_cd(&good).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "app/file.txt");
+        // A traversal entry fails before anything is unpacked, not after.
+        let evil = dir.path().join("evil.zip");
+        std::fs::write(&evil, stored_zip("../evil.txt", b"hi")).unwrap();
+        assert!(read_local_cd(&evil).is_err(), "traversal");
+        assert!(read_local_cd(&dir.path().join("missing.zip")).is_err());
     }
 }

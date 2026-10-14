@@ -19,6 +19,8 @@ pub struct Entry {
     pub uncomp_size: u64,
     pub local_offset: u64,
     pub method: u16,
+    /// DOS/external file attributes (symlink detection lives in the Unix mode bits).
+    pub external_attrs: u32,
 }
 
 /// Compression methods a delta copies opaquely (stored, deflated).
@@ -126,6 +128,7 @@ pub fn parse_cd(bytes: &[u8], expected: u64) -> Result<Vec<Entry>, String> {
             uncomp_size: le32(h, 24).ok_or("short central directory entry")? as u64,
             local_offset: le32(h, 42).ok_or("short central directory entry")? as u64,
             method: le16(h, 10).ok_or("short central directory entry")?,
+            external_attrs: le32(h, 38).ok_or("short central directory entry")?,
         });
         off = end;
     }
@@ -164,6 +167,70 @@ pub fn parse_local_header(bytes: &[u8]) -> Result<LocalHeader, String> {
         comp_size: le32(h, 18).ok_or("short local header")? as u64,
         has_descriptor: flags & 0x08 != 0,
     })
+}
+
+/// Safety caps for an installable archive: absurd counts or sizes fail fast instead of
+/// exhausting memory or disk.
+pub const MAX_ZIP_FILES: usize = 30_000;
+pub const MAX_ZIP_BYTES: u64 = 8 << 30;
+
+/// Rejects archives that must never touch disk: traversal/absolute paths, Windows reserved
+/// names, alternate streams, symlinks, unsupported methods, duplicates, and absurd sizes.
+/// Callers decide the meaning: the delta path falls back to a full download, the install
+/// path refuses with a clear error (a full download of the same bytes would fail alike).
+pub fn validate_entries(entries: &[Entry]) -> Result<(), String> {
+    if entries.len() > MAX_ZIP_FILES {
+        return Err("too many files in the archive".into());
+    }
+    let mut total: u64 = 0;
+    let mut seen = std::collections::HashSet::new();
+    for e in entries {
+        if !supported_method(e.method) {
+            return Err("unsupported compression method".into());
+        }
+        if !seen.insert(e.name.as_str()) {
+            return Err("duplicate entry name".into());
+        }
+        safe_name(&e.name)?;
+        if e.external_attrs >> 16 & 0o170000 == 0o120000 {
+            return Err("archive symlink rejected".into());
+        }
+        total = total.checked_add(e.uncomp_size).ok_or("archive size overflow")?;
+        if total > MAX_ZIP_BYTES {
+            return Err("archive too large".into());
+        }
+    }
+    Ok(())
+}
+
+/// A name that cannot escape its folder, collide with a device, or smuggle a stream.
+fn safe_name(name: &str) -> Result<(), String> {
+    let normalized = name.replace('\\', "/");
+    if normalized.contains(':') || normalized.starts_with('/') {
+        return Err("unsafe archive path".into());
+    }
+    let mut parts = 0;
+    for part in normalized.split('/') {
+        parts += 1;
+        if part.is_empty() || part == "." || part == ".." {
+            return Err("unsafe archive path".into());
+        }
+        if part.ends_with([' ', '.']) {
+            return Err("reserved Windows path".into());
+        }
+        let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.ends_with(['1', '2', '3', '4', '5', '6', '7', '8', '9']))
+        {
+            return Err("reserved Windows path".into());
+        }
+    }
+    if parts == 0 {
+        return Err("unsafe archive path".into());
+    }
+    Ok(())
 }
 
 /// Where one new entry's bytes come from.
@@ -246,6 +313,7 @@ mod tests {
         let e = &entries[0];
         assert_eq!(e.name, "wordcraft-0.6.1-windows-x64-portable/LICENSE-APACHE");
         assert_eq!((e.method, e.crc, e.comp_size, e.uncomp_size, e.local_offset), (8, 0x9ba5c7c8, 3560, 10351, 0));
+        assert_eq!(e.external_attrs, 0);
         assert!(parse_cd(&REAL_ENTRY0, 2).is_err(), "count mismatch");
         assert!(parse_cd(&REAL_ENTRY0[..60], 1).is_err(), "truncated");
     }
@@ -267,7 +335,7 @@ mod tests {
     }
 
     fn entry(name: &str, crc: u32, comp: u64) -> Entry {
-        Entry { name: name.into(), crc, comp_size: comp, uncomp_size: comp, local_offset: 0, method: 8 }
+        Entry { name: name.into(), crc, comp_size: comp, uncomp_size: comp, local_offset: 0, method: 8, external_attrs: 0 }
     }
 
     #[test]
@@ -279,5 +347,22 @@ mod tests {
         assert_eq!(plan(&old, &[entry("a", 1, 11)]).unwrap(), [Need::Fetch]);
         assert!(plan(&old, &[entry("x", 1, 10), entry("x", 1, 10)]).is_err(), "duplicate names");
         assert!(plan(&[entry("a", 1, 10)], &[Entry { method: 99, ..entry("a", 1, 10) }]).is_err(), "bad method");
+    }
+
+    #[test]
+    fn validation_rejects_hostile_archives() {
+        assert!(validate_entries(&[entry("a", 1, 10)]).is_ok());
+        assert!(validate_entries(&[entry("../escape", 1, 10)]).is_err(), "traversal");
+        assert!(validate_entries(&[entry("/abs", 1, 10)]).is_err(), "absolute");
+        assert!(validate_entries(&[entry("C:\\win", 1, 10)]).is_err(), "drive letter");
+        assert!(validate_entries(&[entry("a:stream", 1, 10)]).is_err(), "alternate stream");
+        assert!(validate_entries(&[entry("CON", 1, 10)]).is_err(), "reserved name");
+        assert!(validate_entries(&[entry("dir/COM1.txt", 1, 10)]).is_err(), "reserved name in folder");
+        assert!(validate_entries(&[entry("x", 1, 10), entry("x", 1, 10)]).is_err(), "duplicate names");
+        assert!(validate_entries(&[Entry { method: 99, ..entry("a", 1, 10) }]).is_err(), "bad method");
+        assert!(validate_entries(&[Entry { external_attrs: 0o120000 << 16, ..entry("a", 1, 10) }]).is_err(), "symlink");
+        // A real published entry passes validation.
+        let real = parse_cd(&REAL_ENTRY0, 1).unwrap();
+        assert!(validate_entries(&real).is_ok());
     }
 }

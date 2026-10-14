@@ -53,7 +53,6 @@ pub fn install(
     previous: Option<&Record>,
     job: &mut Job<'_>,
 ) -> Result<Option<Record>, String> {
-    let _ = previous;
     if let Some(inst) = existing
         && inst.source.launcher_can_update()
         && process::is_running(Path::new(&inst.location))
@@ -73,7 +72,7 @@ pub fn install(
         #[cfg(windows)]
         PackageKind::Msi => windows::run_msi(&file, job.stop, &mut *job.phase).map(|_| None),
         #[cfg(windows)]
-        PackageKind::PortableZip => windows::install_portable(app, &file, &job.install_root, job.stop).map(|exe| {
+        PackageKind::PortableZip => windows::install_portable(app, &file, &job.install_root, previous, job.stop).map(|exe| {
             let dir = match exe.parent() {
                 Some(p) => p.to_path_buf(),
                 None => PathBuf::new(),
@@ -1421,14 +1420,47 @@ pub mod windows {
         if dirs.len() == 1 { dirs.pop() } else { None }
     }
 
-    /// Installs a portable zip. New install path (MSI stays the default): unpacks to staging,
+    /// A destination the launcher didn't install into is never overwritten: an update
+    /// proceeds only when `dest` is missing, empty, or exactly the previous install's root,
+    /// so switching folders can't wipe an MSI-owned copy or user files (the swap below
+    /// deletes whatever the old folder holds).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn dest_is_ours(dest: &Path, previous_root: Option<&Path>) -> bool {
+        if previous_root == Some(dest) {
+            return true;
+        }
+        std::fs::read_dir(dest).map(|mut d| d.next().is_none()).unwrap_or(true)
+    }
+
+    /// The published zips ship a `portable.txt` marker for manual installs; the launcher's
+    /// own record tracks the install instead, so a stale marker is never left to confuse
+    /// detection. Only that exact top-level name goes: anything else stays untouched.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn drop_portable_marker(staging: &Path) {
+        let marker = staging.join("portable.txt");
+        if let Err(e) = std::fs::remove_file(&marker)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("couldn't remove {} ({e}); leaving it in place", marker.display());
+        }
+    }
+
+    /// Installs a portable zip. New install path (MSI stays the default): the zip's
+    /// directory is validated before anything is unpacked, then it unpacks to staging,
     /// flattens the zip's single versioned top folder away, swaps the result into
     /// `%LOCALAPPDATA%\Programs\<App>` (the new copy fully in place before the old one goes),
     /// and writes a Start Menu shortcut (a shortcut failure only warns: the app runs fine
-    /// without it). Returns the installed exe.
+    /// without it). A folder holding files the launcher didn't install is refused, unless
+    /// it is the previous install's own root. Returns the installed exe.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn install_portable(app: &CraftApp, file: &Path, root: &InstallRoot, stop: &Stop) -> Result<PathBuf, String> {
+    pub fn install_portable(app: &CraftApp, file: &Path, root: &InstallRoot, previous: Option<&Record>, stop: &Stop) -> Result<PathBuf, String> {
         let dest = portable_dir(app, root).ok_or("can't use that folder for installs: pick an absolute path that exists or can be created")?;
+        if !dest_is_ours(&dest, previous.and_then(|r| r.root.as_deref())) {
+            return Err(format!("{} already has files the launcher didn't install; pick an empty folder", dest.display()));
+        }
+        // The checksum already passed: this rejects a hostile or broken zip before it can
+        // write outside its folder (a delta-assembled file is checked here too).
+        zip_fetch::read_local_cd(file).map_err(|e| format!("the download isn't a usable portable zip ({e})"))?;
         let staging = dest.parent().map(|p| p.join(format!("{}.new", app.name))).ok_or("no local app-data folder")?;
         let _ = std::fs::remove_dir_all(&staging);
         powershell(&expand_script(file, &staging)).map_err(|e| format!("couldn't unpack the download ({e})"))?;
@@ -1441,6 +1473,7 @@ pub mod windows {
             }
             std::fs::remove_dir_all(&top).map_err(|e| format!("couldn't arrange the unpacked download ({e})"))?;
         }
+        drop_portable_marker(&staging);
         let staged_exe = portable_exe(app, &staging).ok_or_else(|| format!("the download has no {} executable", app.name))?;
         let rel = staged_exe.strip_prefix(&staging).map_err(|_| "the download escaped its folder".to_string())?.to_path_buf();
         stop.check()?;
@@ -1935,6 +1968,39 @@ mod tests {
         let stray = Record { path: elsewhere.join("wordcraft.exe"), ..record.clone() };
         assert!(windows::remove_portable(app, &stray).is_err());
         assert!(elsewhere.exists());
+    }
+
+    #[test]
+    fn portable_installs_refuse_unmanaged_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(windows::dest_is_ours(&missing, None), "fresh folder");
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(windows::dest_is_ours(&empty, None), "empty folder");
+        // A folder with files the launcher didn't install is refused...
+        let lived_in = dir.path().join("lived-in");
+        std::fs::create_dir(&lived_in).unwrap();
+        std::fs::write(lived_in.join("mine.txt"), "x").unwrap();
+        assert!(!windows::dest_is_ours(&lived_in, None));
+        // ...unless it is the previous install's own root being updated.
+        assert!(windows::dest_is_ours(&lived_in, Some(&lived_in)));
+        let other = dir.path().join("other");
+        assert!(!windows::dest_is_ours(&lived_in, Some(&other)));
+    }
+
+    #[test]
+    fn portable_marker_drop_keeps_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        // Missing marker is fine: nothing to drop.
+        windows::drop_portable_marker(&staging);
+        std::fs::write(staging.join("portable.txt"), "x").unwrap();
+        std::fs::write(staging.join("app.exe"), "x").unwrap();
+        windows::drop_portable_marker(&staging);
+        assert!(!staging.join("portable.txt").exists());
+        assert!(staging.join("app.exe").exists(), "only the marker goes");
     }
 
     #[cfg(target_os = "linux")]
