@@ -153,6 +153,12 @@ pub fn fetch_zip_delta(job: ZipJob<'_>) -> Result<(), String> {
     let old_cd_bytes = read_at(old_path, old_eocd.cd_offset, old_eocd.cd_size)?;
     let old_cd = zip_cd::parse_cd(&old_cd_bytes, old_eocd.count)?;
     let plan = zip_cd::plan(&old_cd, &new_cd)?;
+    if let (Some(o), Some(n)) =
+        (zip_cd::common_top(old_cd.iter().map(|e| e.name.as_str())), zip_cd::common_top(new_cd.iter().map(|e| e.name.as_str())))
+        && o != n
+    {
+        log::info!("matching entries by relative paths under '{o}' vs '{n}'");
+    }
     if !plan.iter().any(|p| matches!(p, zip_cd::Need::Copy { .. })) {
         return Err("nothing reusable; a full download is cheaper".into());
     }

@@ -242,19 +242,53 @@ pub enum Need {
     Fetch,
 }
 
+/// The single shared top folder of every name, if there is exactly one: backslashes
+/// count as slashes, so `v1\a` and `v1/a` agree. The top folder itself (`v1`, `v1/`)
+/// is allowed through; anything else outside it (flat names, several tops) means names
+/// stand on their own and match exactly as before.
+pub fn common_top<'a, I>(names: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let all: Vec<String> = names.into_iter().map(|n| n.replace('\\', "/")).collect();
+    let candidate = all.iter().filter_map(|n| n.split_once('/').map(|(first, _)| first)).next()?;
+    if candidate.is_empty() {
+        return None;
+    }
+    let prefix = format!("{candidate}/");
+    for n in &all {
+        if *n != candidate && !n.starts_with(&prefix) {
+            return None;
+        }
+    }
+    Some(candidate.to_string())
+}
+
+/// The name `plan` matches on: the path inside the directory's single top folder when
+/// there is one, else the full name exactly as published (byte-identical to before).
+fn match_key(name: &str, top: Option<&str>) -> String {
+    let Some(t) = top else { return name.to_string() };
+    name.replace('\\', "/").strip_prefix(&format!("{t}/")).unwrap_or(name).to_string()
+}
+
 /// Matches the new directory against the retained one: same name, CRC32, compressed size and
 /// method means the compressed bytes are reused (the final SHA-256 still vouches for the
-/// assembly). Duplicate names or an unsupported method fail safe towards a full download.
+/// assembly). When both directories sit under their own single top folder (the versioned
+/// folder publishers wrap releases in), names match by their path inside it, so a renamed
+/// top folder alone never forces a full download. Duplicate names or an unsupported method
+/// fail safe towards a full download.
 pub fn plan(old: &[Entry], new: &[Entry]) -> Result<Vec<Need>, String> {
-    let mut by_name: HashMap<&str, usize> = HashMap::new();
+    let old_top = common_top(old.iter().map(|e| e.name.as_str()));
+    let new_top = common_top(new.iter().map(|e| e.name.as_str()));
+    let mut by_name: HashMap<String, usize> = HashMap::new();
     for (i, e) in old.iter().enumerate() {
-        if by_name.insert(e.name.as_str(), i).is_some() {
+        if by_name.insert(match_key(&e.name, old_top.as_deref()), i).is_some() {
             return Err("duplicate entry name".into());
         }
     }
     let mut seen = std::collections::HashSet::new();
     for e in new {
-        if !seen.insert(e.name.as_str()) {
+        if !seen.insert(match_key(&e.name, new_top.as_deref())) {
             return Err("duplicate entry name".into());
         }
     }
@@ -263,7 +297,7 @@ pub fn plan(old: &[Entry], new: &[Entry]) -> Result<Vec<Need>, String> {
             if !supported_method(n.method) {
                 return Err("unsupported compression method".into());
             }
-            match by_name.get(n.name.as_str()) {
+            match by_name.get(&match_key(&n.name, new_top.as_deref())) {
                 Some(&oi) if old.get(oi).is_some_and(|o| o.method == n.method && o.crc == n.crc && o.comp_size == n.comp_size) => {
                     Ok(Need::Copy { old_index: oi })
                 }
@@ -364,5 +398,31 @@ mod tests {
         // A real published entry passes validation.
         let real = parse_cd(&REAL_ENTRY0, 1).unwrap();
         assert!(validate_entries(&real).is_ok());
+    }
+
+    #[test]
+    fn top_folders_match_by_relative_path() {
+        use std::iter::empty;
+        assert_eq!(common_top(["v1/a", "v1/b"].into_iter()), Some("v1".to_string()));
+        assert_eq!(common_top(["v1/", "v1/a"].into_iter()), Some("v1".to_string()));
+        assert_eq!(common_top(["v1\\a", "v1/b"].into_iter()), Some("v1".to_string()));
+        assert_eq!(common_top(["a", "b"].into_iter()), None, "flat names stand alone");
+        assert_eq!(common_top(["v1/a", "v2/a"].into_iter()), None, "several tops");
+        assert_eq!(common_top(["v1/a", "flat"].into_iter()), None, "a stray vetoes");
+        assert_eq!(common_top(["/a", "/b"].into_iter()), None, "empty top");
+        assert_eq!(common_top(empty::<&str>()), None);
+    }
+
+    #[test]
+    fn plan_matches_across_renamed_top_folders() {
+        fn e(top: &str, name: &str, crc: u32, comp: u64) -> Entry {
+            Entry { name: format!("{top}/{name}"), crc, comp_size: comp, uncomp_size: comp, local_offset: 0, method: 8, external_attrs: 0 }
+        }
+        let old = vec![e("v1", "keep.txt", 7, 70), e("v1", "new.bin", 8, 80)];
+        let new = vec![e("v2", "keep.txt", 7, 70), e("v2", "new.bin", 9, 80)];
+        assert_eq!(plan(&old, &new).unwrap(), [Need::Copy { old_index: 0 }, Need::Fetch]);
+        // Same top on both sides behaves exactly as before.
+        let same = vec![e("v1", "keep.txt", 7, 70)];
+        assert_eq!(plan(&same, &same).unwrap(), [Need::Copy { old_index: 0 }]);
     }
 }

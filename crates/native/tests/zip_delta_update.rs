@@ -231,3 +231,30 @@ fn nothing_reusable_skips_the_delta() {
     assert_eq!(hits.lock().unwrap().len(), 2);
     assert!(!tmp.exists());
 }
+
+#[test]
+fn delta_reuses_entries_across_renamed_top_folders() {
+    // Publishers wrap each release in a versioned top folder: only the top differs,
+    // so the identical entry must copy from the base while the changed one fetches.
+    let old = build_zip(&[("v1/a.txt", &[1u8; 400000]), ("v1/b.txt", &[2u8; 200])]);
+    let new = build_zip(&[("v2/a.txt", &[1u8; 400000]), ("v2/b.txt", &[9u8; 200])]);
+    // Tail + directory + one header per entry (2) + changed data (1) + tail copy (1).
+    let (url, hits) = serve(new.clone(), true, 6);
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("new.zip.delta.tmp");
+    let old_path = dir.path().join("old.zip");
+    std::fs::write(&old_path, &old).unwrap();
+    zip_fetch::fetch_zip_delta(ZipJob {
+        http: &Http::new().unwrap(),
+        base_url: &url,
+        file_size: new.len() as u64,
+        old_path: &old_path,
+        tmp_path: &tmp,
+        expected_sha256: &sha256_hex(&new),
+        stop: &Stop::default(),
+        progress: &mut |_, _| {},
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&tmp).unwrap(), new);
+    assert!(travelled(&hits) < new.len() as u64 / 2, "{} of {} bytes", travelled(&hits), new.len());
+}
