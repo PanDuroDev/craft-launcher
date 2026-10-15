@@ -443,6 +443,23 @@ impl NativeBackend {
     }
 }
 
+/// Saves the manifest, retrying transient locks (antivirus, indexer). Callers fail loud
+/// on persistent failure for launcher-owned copies: see `run_install`.
+fn save_manifest(paths: &Paths, manifest: &Manifest, tries: u32) -> Result<(), String> {
+    let mut err = String::new();
+    for attempt in 0..tries.max(1) {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        match manifest.save(&paths.manifest()) {
+            Ok(()) => return Ok(()),
+            Err(e) => err = e,
+        }
+    }
+    Err(err)
+}
+
+// Pre-existing arity (the whole install job context); newer toolchains lint it.
 #[allow(clippy::too_many_arguments)]
 fn run_install(
     app: &CraftApp,
@@ -482,16 +499,27 @@ fn run_install(
     let new_record = install::install(app, &release, &asset, kind, existing, record, &mut job)?;
     {
         let mut m = shared.manifest.lock().unwrap_or_else(PoisonError::into_inner);
-        let changed = match new_record {
+        let changed = match &new_record {
             Some(r) => {
-                m.apps.insert(app.id.to_string(), r);
+                m.apps.insert(app.id.to_string(), r.clone());
                 true
             }
             // Installed the platform's own way: any old launcher record is stale.
             None => m.apps.remove(app.id).is_some(),
         };
-        if changed && let Err(e) = m.save(&paths.manifest()) {
-            log::warn!("couldn't save the install record: {e}");
+        if changed {
+            // A transient lock (antivirus, indexer) fails the first save: retry before
+            // giving up. A lost record bricks future updates of a launcher-owned copy
+            // (nothing pins its folder), so that failure is loud, with recovery steps.
+            if let Err(e) = save_manifest(paths, &m, 3) {
+                match &new_record {
+                    Some(r) => {
+                        let dir = r.path.parent().map(|p| p.display().to_string()).unwrap_or_else(|| r.path.display().to_string());
+                        return Err(format!("installed, but couldn't save the ownership record ({e}); remove {dir} and install again"));
+                    }
+                    None => log::warn!("couldn't save the install record: {e}"),
+                }
+            }
         }
     }
     Ok(installed_text(app, existing.is_some(), &release))
@@ -1323,6 +1351,17 @@ mod tests {
 
     fn copy(v: &str) -> Installed {
         Installed { version: version::parse(v), source: InstallSource::Deb, location: String::new(), package: None }
+    }
+
+    #[test]
+    fn manifest_save_failure_is_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        save_manifest(&paths, &Manifest::default(), 3).unwrap();
+        // A directory where installed.json goes: saving fails persistently.
+        std::fs::remove_file(paths.manifest()).unwrap();
+        std::fs::create_dir(paths.manifest()).unwrap();
+        assert!(save_manifest(&paths, &Manifest::default(), 2).is_err());
     }
 
     #[test]
