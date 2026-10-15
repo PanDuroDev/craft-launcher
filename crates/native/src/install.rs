@@ -82,7 +82,15 @@ pub fn install(
                 None => PathBuf::new(),
             };
             let mut rec = record(&version, kind, exe, windows::walk_files(&dir), false);
-            rec.root = Some(dir);
+            rec.root = Some(dir.clone());
+            if let Some(prev) = previous.and_then(|r| r.root.clone()) {
+                let old_files: &[PathBuf] = previous.map(|r| r.files.as_slice()).unwrap_or(&[]);
+                if prev != dir {
+                    windows::prune_old_root(&prev, old_files).unwrap_or_else(|e| {
+                        log::warn!("couldn't remove the previous install folder ({e}); it was left in place");
+                    });
+                }
+            }
             Some(rec)
         }),
         #[cfg(target_os = "linux")]
@@ -1449,6 +1457,39 @@ pub mod windows {
         }
     }
 
+    /// After a successful move, drops the previous root when it holds nothing but what
+    /// the previous record lists: a stray user file (or link) keeps the whole folder,
+    /// with a warning. A missing folder is already gone.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn prune_old_root(old_root: &Path, old_files: &[PathBuf]) -> Result<(), String> {
+        if !old_root.is_dir() {
+            return Ok(());
+        }
+        let mut stack = vec![old_root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let read_dir = std::fs::read_dir(&dir).map_err(|e| format!("couldn't check {} ({e})", old_root.display()))?;
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("couldn't check {} ({e})", old_root.display()))?;
+                if meta.is_symlink() {
+                    log::warn!("{} holds a link; it was left in place", old_root.display());
+                    return Ok(());
+                }
+                if meta.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(old_root).map_err(|_| format!("{} escaped its folder", path.display()))?;
+                if !old_files.contains(&rel.to_path_buf()) {
+                    log::warn!("{} holds files the launcher didn't install; it was left in place", old_root.display());
+                    return Ok(());
+                }
+            }
+        }
+        std::fs::remove_dir_all(old_root).map_err(|e| format!("couldn't remove {} ({e})", old_root.display()))?;
+        Ok(())
+    }
+
     /// Where `app`'s portable copy goes: the previous install's own root when there is
     /// one, else the configured location. Updates stay where the app is even when the
     /// setting moved on since (it governs new installs); a record without a root (from
@@ -2057,6 +2098,29 @@ mod tests {
         let dest = windows::check_portable_dest(app, &InstallRoot::Custom(dir.path().join("fresh")), None).unwrap();
         assert_eq!(dest, dir.path().join("fresh").join("WordCraft"));
         assert!(dest.is_dir());
+    }
+
+    #[test]
+    fn portable_prune_leaves_stray_files_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only recorded files: the whole folder goes.
+        let old = dir.path().join("old");
+        std::fs::create_dir_all(old.join("sub")).unwrap();
+        std::fs::write(old.join("app.exe"), "x").unwrap();
+        std::fs::write(old.join("sub").join("data.bin"), "x").unwrap();
+        let recorded = [PathBuf::from("app.exe"), PathBuf::from("sub").join("data.bin")];
+        windows::prune_old_root(&old, &recorded).unwrap();
+        assert!(!old.exists());
+        // A stray file: everything stays.
+        let lived = dir.path().join("lived");
+        std::fs::create_dir(&lived).unwrap();
+        std::fs::write(lived.join("app.exe"), "x").unwrap();
+        std::fs::write(lived.join("mine.txt"), "x").unwrap();
+        windows::prune_old_root(&lived, &recorded[..1]).unwrap();
+        assert!(lived.join("mine.txt").exists());
+        assert!(lived.join("app.exe").exists());
+        // A missing folder: nothing to do.
+        windows::prune_old_root(&dir.path().join("gone"), &[]).unwrap();
     }
 
     #[test]
