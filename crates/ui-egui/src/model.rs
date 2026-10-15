@@ -60,6 +60,21 @@ impl AppEntry {
         self.installed.as_ref().map(|i| i.version.as_ref().map(ToString::to_string).unwrap_or_else(|| t("Installed").to_string()))
     }
 
+    /// How the installed copy arrived, for the badge: the release format when known,
+    /// else where it was found (`None` when nothing is installed).
+    pub fn installed_kind_label(&self) -> Option<&'static str> {
+        let installed = self.installed.as_ref()?;
+        Some(installed.kind.map(|k| k.label()).unwrap_or(installed.source.label()))
+    }
+
+    /// What `Install` would download now: the first platform format with a published
+    /// asset in the latest release. A label only; the backend decides the real one.
+    pub fn planned_kind_label(&self, platform: Option<Platform>) -> Option<&'static str> {
+        let (release, platform) = (self.release()?, platform?);
+        let stems: Vec<&str> = self.app.stems().collect();
+        pick_asset(release, &stems, platform, platform.download_kinds()).map(|(_, kind)| kind.label())
+    }
+
     pub fn latest_label(&self) -> Option<String> {
         self.release().map(Release::version_label)
     }

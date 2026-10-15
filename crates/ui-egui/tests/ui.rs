@@ -146,6 +146,7 @@ fn events() -> Vec<Event> {
             source: InstallSource::MacApp,
             location: format!("/Applications/{}.app", app.name),
             package: None,
+            kind: None,
         });
         ev.push(Event::Detected { app: app.id.into(), installed: inst });
     }
@@ -302,6 +303,19 @@ fn grid_shows_every_status_and_installs_on_click() {
     let installs: Vec<_> = sent.borrow().iter().filter_map(|c| if let Command::Install { app } = c { Some(app.clone()) } else { None }).collect();
     assert_eq!(installs.len(), 2, "{installs:?}");
     assert!(installs.contains(&"photocraft".to_string()) && installs.contains(&"effectcraft".to_string()));
+}
+
+#[test]
+fn cards_and_rows_name_the_install_format() {
+    // Fixtures: MacApp installs of unknown format, dmg releases on this (mac) platform.
+    for view in [ViewMode::Grid, ViewMode::Table] {
+        let (mut h, _) = harness(view, egui::Theme::Dark, true);
+        h.run_steps(8);
+        // Installed: where the copy came from (the source, the record kind unknown).
+        assert!(h.query_all_by_label_contains("Applications folder").count() >= 1);
+        // Not installed: what Install would download (the release format for this platform).
+        assert!(h.query_all_by_label_contains("Disk image (.dmg)").count() >= 1);
+    }
 }
 
 #[test]

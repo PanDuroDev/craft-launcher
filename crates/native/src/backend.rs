@@ -1313,7 +1313,7 @@ mod tests {
     }
 
     fn copy(v: &str) -> Installed {
-        Installed { version: version::parse(v), source: InstallSource::Deb, location: String::new(), package: None }
+        Installed { version: version::parse(v), source: InstallSource::Deb, location: String::new(), package: None, kind: None }
     }
 
     #[test]

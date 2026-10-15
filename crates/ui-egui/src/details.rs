@@ -226,7 +226,7 @@ impl LauncherUi {
                     widgets::wordmark(ui, app, 32.0);
                     ui.add(egui::Label::new(RichText::new(details.headline).size(15.0).color(t.ink)).wrap());
                     // "Version 0.5.0 · Oct 8, 2026", or the installed-versus-latest line.
-                    let version = crate::views::version_line(entry, &status);
+                    let version = crate::views::version_line(entry, &status, self.platform);
                     if !version.trim().is_empty() {
                         ui.label(RichText::new(version).size(12.5).color(t.muted));
                     }
