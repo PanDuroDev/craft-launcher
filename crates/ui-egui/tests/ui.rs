@@ -657,6 +657,19 @@ fn complete_removal_is_a_toggle_not_a_second_button() {
     assert!(sent.borrow().iter().any(|c| matches!(c, Command::Uninstall { complete: true, .. })), "{:?}", sent.borrow());
 }
 
+#[cfg(windows)]
+#[test]
+fn the_menu_offers_to_verify_an_unmanaged_copy() {
+    // VectorCraft is not installed: its menu offers the check, which asks the backend.
+    let (mut h, sent) = harness(ViewMode::Table, egui::Theme::Dark, true);
+    h.run_steps(6);
+    h.get_all_by_label("…").nth(1).unwrap().click();
+    h.run_steps(3);
+    h.get_by_label("Check for an existing copy").click();
+    h.run_steps(2);
+    assert!(sent.borrow().iter().any(|c| matches!(c, Command::Verify { .. })), "{:?}", sent.borrow());
+}
+
 #[test]
 fn links_to_the_website_github_and_each_apps_pages() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);

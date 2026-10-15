@@ -1337,6 +1337,41 @@ pub mod windows {
         app.stems().map(|s| dir.join(format!("{s}.exe"))).find(|p| p.is_file())
     }
 
+    /// An existing portable copy without a record: its folder, when exactly one of the
+    /// expected places (the default and the configured root) holds this app's exe.
+    /// Anything else explains itself as an error naming what to remove by hand.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn find_adoptable(app: &CraftApp, root: &InstallRoot) -> Result<PathBuf, String> {
+        let mut dirs = Vec::new();
+        let places = [InstallRoot::Default, root.clone()];
+        for dir in places.into_iter().filter_map(|r| portable_dir(app, &r)) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        adoptable_in(app, &dirs)
+    }
+
+    /// Picks the single occupied home from already-deduplicated `dirs`: none and
+    /// several both explain themselves instead of guessing.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn adoptable_in(app: &CraftApp, dirs: &[PathBuf]) -> Result<PathBuf, String> {
+        let mut found = Vec::new();
+        for dir in dirs {
+            if dir.is_dir() && portable_exe(app, dir).is_some() {
+                found.push(dir.clone());
+            }
+        }
+        match found.as_slice() {
+            [single] => Ok(single.clone()),
+            [] => Err(format!("no {} copy found where portable installs live; install it fresh, or delete stray folders by hand", app.name)),
+            many => {
+                let places = many.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+                Err(format!("{} lives in two places ({}); remove one by hand, then verify again", app.name, places))
+            }
+        }
+    }
+
     /// The Start Menu shortcut for a portable install.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn shortcut_path(app: &CraftApp) -> Option<PathBuf> {
@@ -2253,6 +2288,33 @@ mod tests {
         assert!(lived.join("app.exe").exists());
         // A missing folder: nothing to do.
         windows::prune_old_root(&dir.path().join("gone"), &[]).unwrap();
+    }
+
+    #[test]
+    fn adoptable_needs_exactly_one_expected_home() {
+        let app = CraftApp::by_id("wordcraft").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let lived = dir.path().join("WordCraft");
+        std::fs::create_dir(&lived).unwrap();
+        std::fs::write(lived.join("wordcraft.exe"), "x").unwrap();
+        let empty = dir.path().join("Empty");
+        std::fs::create_dir(&empty).unwrap();
+        let wrong = dir.path().join("Wrong");
+        std::fs::create_dir(&wrong).unwrap();
+        std::fs::write(wrong.join("notes.txt"), "x").unwrap();
+        let missing = dir.path().join("Missing");
+        // Exactly one occupied home wins, whatever else is listed.
+        assert_eq!(windows::adoptable_in(app, &[empty.clone(), lived.clone(), missing.clone()]), Ok(lived.clone()));
+        // None occupied: guidance, not silence.
+        let err = windows::adoptable_in(app, &[empty.clone(), wrong.clone(), missing.clone()]).unwrap_err();
+        assert!(err.contains("copy found where portable installs live"), "{err}");
+        // Two occupied: ambiguity refused, both named.
+        let twin = dir.path().join("Twin");
+        std::fs::create_dir(&twin).unwrap();
+        std::fs::write(twin.join("wordcraft.exe"), "x").unwrap();
+        let err = windows::adoptable_in(app, &[lived.clone(), twin.clone()]).unwrap_err();
+        assert!(err.contains("two places"), "{err}");
+        assert!(lived.exists() && twin.exists(), "refusal touches nothing");
     }
 
     #[test]

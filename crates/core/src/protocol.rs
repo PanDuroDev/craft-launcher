@@ -31,6 +31,13 @@ pub enum Command {
         /// a complete removal. Off is an ordinary uninstall, keeping it.
         complete: bool,
     },
+    /// Look for an existing portable copy without a record (an install from before
+    /// records, or one whose record was lost) in the expected places, and adopt it:
+    /// a record is written so updates and removal work again. Anything else explains
+    /// itself as an error with what to do by hand.
+    Verify {
+        app: String,
+    },
     Launch {
         app: String,
     },
