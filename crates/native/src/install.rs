@@ -1374,12 +1374,28 @@ pub mod windows {
         format!("'{}'", path.display().to_string().replace('\'', "''"))
     }
 
+    /// Runs PowerShell, watching `stop`: a cancelled wait kills the child and reports
+    /// cancellation like every other stoppable step (a stuck unpack no longer wedges
+    /// the cancel button; the next install clears the abandoned staging).
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) fn powershell(script: &str) -> Result<std::process::ExitStatus, String> {
-        process::command("powershell.exe")
+    pub(crate) fn powershell(script: &str, stop: &Stop) -> Result<std::process::ExitStatus, String> {
+        let mut child = process::command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script])
-            .status()
-            .map_err(|e| format!("couldn't run PowerShell ({e})"))
+            .spawn()
+            .map_err(|e| format!("couldn't run PowerShell ({e})"))?;
+        loop {
+            match child.try_wait().map_err(|e| format!("couldn't run PowerShell ({e})"))? {
+                Some(status) => return Ok(status),
+                None => {
+                    if let Err(cancelled) = stop.check() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(cancelled);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
     }
 
     /// `Expand-Archive` script: unpacks `zip` into a fresh `dest`.
@@ -1531,7 +1547,7 @@ pub mod windows {
         zip_fetch::read_local_cd(file).map_err(|e| format!("the download isn't a usable portable zip ({e})"))?;
         let staging = dest.parent().map(|p| p.join(format!("{}.new", app.name))).ok_or("no local app-data folder")?;
         let _ = std::fs::remove_dir_all(&staging);
-        powershell(&expand_script(file, &staging)).map_err(|e| format!("couldn't unpack the download ({e})"))?;
+        powershell(&expand_script(file, &staging), stop).map_err(|e| format!("couldn't unpack the download ({e})"))?;
         stop.check()?;
         // The zip holds one versioned top folder; the install dir stays stable across updates.
         if let Some(top) = single_child_dir(&staging) {
@@ -1549,7 +1565,7 @@ pub mod windows {
         let exe = dest.join(&rel);
         if let Some(lnk) = shortcut_path(app) {
             let dir = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| dest.clone());
-            if powershell(&shortcut_script(&lnk, &exe, &dir)).is_err() {
+            if powershell(&shortcut_script(&lnk, &exe, &dir), stop).is_err() {
                 log::warn!("couldn't write the Start Menu shortcut; {} still runs from {}", app.name, exe.display());
             }
         }
@@ -1941,6 +1957,17 @@ mod tests {
         let kinds = available_kinds();
         assert_eq!(kinds.first(), Some(&PackageKind::Msi));
         assert!(kinds.contains(&PackageKind::PortableZip));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_stops_when_asked() {
+        let stop = Stop::default();
+        stop.cancel();
+        let started = std::time::Instant::now();
+        let err = windows::powershell("Start-Sleep -Seconds 30", &stop).unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited out the sleep instead of killing it");
     }
 
     #[test]
