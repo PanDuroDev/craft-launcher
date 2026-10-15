@@ -544,7 +544,17 @@ impl LauncherUi {
                             if key == Some(SortKey::Name) {
                                 rule(ui);
                             }
-                            let Some(k) = key else { return };
+                            let Some(k) = key else {
+                                // A titled column without sorting: paint the label and stop.
+                                if !label.is_empty() {
+                                    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                                    let galley = widgets::hud_galley(ui, label, t.faint);
+                                    let at = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+                                    ui.painter().galley(at, galley, t.faint);
+                                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+                                }
+                                return;
+                            };
                             let active = k == self.settings.sort;
                             let tip = if active { tl!("Click to reverse the order") } else { tl!("Click to sort by this column") };
                             // Measure first so the whole header cell (label + arrow) is the target.
