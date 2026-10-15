@@ -846,7 +846,7 @@ impl LauncherUi {
             // A copy without a record is invisible and blocks reinstalling: offer to look
             // for it in the expected places (portable installs on Windows only).
             if manage && !status.is_installed() && cfg!(windows) && ui.button(tl!("Check for an existing copy")).clicked() {
-                self.send(Command::Verify { app: id.clone() });
+                self.send(Command::Verify { app: id.clone(), quiet: false });
                 ui.close();
             }
             if !manage && let (Some(r), Some(p)) = (entry.release(), self.platform) {

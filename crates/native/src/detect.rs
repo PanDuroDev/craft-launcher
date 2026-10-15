@@ -112,7 +112,7 @@ fn exe_candidates(app: &CraftApp, location: Option<&Path>, program_files: &[Path
 /// Version from `<app> --version` output. Binaries print the machine id (`photocraft 0.7.0`),
 /// the display name (`SoundCraft 0.5.0`), or a former id (`printcraft 0.2.1` for PdfCraft).
 #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd", windows)), allow(dead_code))]
-fn parse_cli_version(line: &str, app: &CraftApp) -> Option<version::Version> {
+pub(crate) fn parse_cli_version(line: &str, app: &CraftApp) -> Option<version::Version> {
     let line = line.trim();
     for prefix in app.stems().chain(std::iter::once(app.name)) {
         if let Some(rest) = strip_cli_prefix(line, prefix)

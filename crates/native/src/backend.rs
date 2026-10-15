@@ -313,7 +313,7 @@ impl NativeBackend {
     /// Looks for an unmanaged portable copy and adopts it (Windows only): the record it
     /// writes makes updates and removal work again. Runs off the UI thread; the outcome
     /// arrives as `JobFinished`, and an adoption also refreshes `Detected`.
-    fn verify_existing(&self, app_id: &str) {
+    fn verify_existing(&self, app_id: &str, quiet: bool) {
         let Some(app) = CraftApp::by_id(app_id) else { return };
         let shared = self.shared.clone();
         let paths = self.paths.clone();
@@ -326,7 +326,11 @@ impl NativeBackend {
                 let _ = (&app, &shared, &paths, &install_root);
                 Err("adoption is for Windows portable copies".to_string())
             };
-            shared.emit(Event::JobFinished { app: app.id.to_string(), result });
+            // Background hygiene stays silent (success already refreshed detection);
+            // a manual check gets its toast.
+            if !quiet {
+                shared.emit(Event::JobFinished { app: app.id.to_string(), result });
+            }
         });
     }
 
@@ -350,7 +354,7 @@ impl NativeBackend {
         let dir = install::windows::find_adoptable(app, install_root)?;
         let exe = install::windows::portable_exe(app, &dir).ok_or_else(|| format!("{} moved while verifying; try again", app.name))?;
         let record = crate::manifest::Record {
-            version: String::new(),
+            version: install::windows::cli_version(app, &dir).map(|v| v.to_string()).unwrap_or_default(),
             kind: PackageKind::PortableZip,
             path: exe.clone(),
             installed_at: crate::now(),
@@ -996,7 +1000,7 @@ impl Backend for NativeBackend {
             Command::Detect => self.detect_all(),
             Command::Install { app } => self.start_job(&app, false, false),
             Command::Uninstall { app, complete } => self.start_job(&app, true, complete),
-            Command::Verify { app } => self.verify_existing(&app),
+            Command::Verify { app, quiet } => self.verify_existing(&app, quiet),
             Command::Pause { app } => {
                 if let Some(stop) = self.shared.jobs.lock().unwrap_or_else(PoisonError::into_inner).get(&app) {
                     stop.pause();

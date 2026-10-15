@@ -354,3 +354,4 @@ filter	Installed	Telepítve
 	Browse	Browse
 	Also delete the saved installer	A mentett telepítő törlése is
 	Check for an existing copy	Meglévő másolat keresése
+	Automatically adopt existing portable copies	A meglévő hordozható másolatok automatikus átvétele

@@ -154,6 +154,9 @@ pub struct LauncherUi {
     /// Versions of apps or the launcher already queued for auto-update during this session,
     /// preventing repeated install loops if an update fails or is in progress.
     pub(crate) auto_update_attempted: std::collections::BTreeSet<(String, String)>,
+    /// Apps already checked for orphaned portable copies this session: the automatic
+    /// check runs once per app per launch, a manual check anytime.
+    pub(crate) auto_verify_attempted: std::collections::BTreeSet<String>,
 }
 
 /// The language to draw in: the preference, or English where it needs a CJK font the system
@@ -212,6 +215,7 @@ impl LauncherUi {
             last_detect: 0,
             was_focused: true,
             auto_update_attempted: std::collections::BTreeSet::new(),
+            auto_verify_attempted: std::collections::BTreeSet::new(),
         }
     }
 
@@ -319,6 +323,7 @@ impl LauncherUi {
             if self.settings.auto_update {
                 self.trigger_auto_updates();
             }
+            self.trigger_auto_verify();
         }
         if self.restart_requested {
             // The helper is waiting for this process to exit before it starts the new launcher.
@@ -499,6 +504,25 @@ impl LauncherUi {
                 self.auto_update_attempted.insert((id, v));
                 self.send(Command::UpdateLauncher);
             }
+        }
+    }
+
+    /// Once per session, quietly looks for orphaned portable copies of unmanaged apps.
+    /// Cheap (a couple of folder stats each) and silent unless something is adopted.
+    pub(crate) fn trigger_auto_verify(&mut self) {
+        if !self.caps.manage_apps || !self.settings.auto_adopt || !cfg!(windows) {
+            return;
+        }
+        let fresh: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.installed.is_none() && e.job.is_none())
+            .map(|e| e.app.id.to_string())
+            .filter(|id| !self.auto_verify_attempted.contains(id))
+            .collect();
+        for id in fresh {
+            self.auto_verify_attempted.insert(id.clone());
+            self.send(Command::Verify { app: id, quiet: true });
         }
     }
 

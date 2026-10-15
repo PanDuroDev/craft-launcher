@@ -670,6 +670,22 @@ fn the_menu_offers_to_verify_an_unmanaged_copy() {
     assert!(sent.borrow().iter().any(|c| matches!(c, Command::Verify { .. })), "{:?}", sent.borrow());
 }
 
+#[cfg(windows)]
+#[test]
+fn auto_verify_asks_once_per_unmanaged_app() {
+    let (mut h, sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
+    h.run_steps(12);
+    let mut counts = std::collections::HashMap::new();
+    for c in sent.borrow().iter() {
+        if let Command::Verify { app, quiet } = c {
+            assert!(*quiet, "background checks stay silent");
+            *counts.entry(app.clone()).or_insert(0) += 1;
+        }
+    }
+    assert!(!counts.is_empty(), "nothing was checked");
+    assert!(counts.values().all(|&n| n == 1), "{counts:?}");
+}
+
 #[test]
 fn links_to_the_website_github_and_each_apps_pages() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);

@@ -353,3 +353,4 @@ filter	Installed	Installiert
 	Browse	Browse
 	Also delete the saved installer	Gespeichertes Installationsprogramm ebenfalls löschen
 	Check for an existing copy	Nach einer vorhandenen Kopie suchen
+	Automatically adopt existing portable copies	Vorhandene portable Kopien automatisch übernehmen

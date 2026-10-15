@@ -34,9 +34,11 @@ pub enum Command {
     /// Look for an existing portable copy without a record (an install from before
     /// records, or one whose record was lost) in the expected places, and adopt it:
     /// a record is written so updates and removal work again. Anything else explains
-    /// itself as an error with what to do by hand.
+    /// itself as an error with what to do by hand. Quiet background checks stay
+    /// silent; a manual check gets its toast.
     Verify {
         app: String,
+        quiet: bool,
     },
     Launch {
         app: String,

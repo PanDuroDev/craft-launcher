@@ -287,6 +287,13 @@ impl LauncherUi {
         {
             self.trigger_auto_updates();
         }
+        if self.caps.manage_apps
+            && cfg!(windows)
+            && ui.checkbox(&mut self.settings.auto_adopt, tl!("Automatically adopt existing portable copies")).changed()
+            && self.settings.auto_adopt
+        {
+            self.trigger_auto_verify();
+        }
         ui.checkbox(&mut self.settings.notify, tl!("Notify me when an installed app has an update"));
         ui.checkbox(&mut self.settings.prereleases, tl!("Include pre-releases (betas and release candidates)"));
 

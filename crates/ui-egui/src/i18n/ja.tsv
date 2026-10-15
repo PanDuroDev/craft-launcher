@@ -356,3 +356,4 @@ filter	Installed	インストール済み
 	Browse	Browse
 	Also delete the saved installer	保存したインストーラーも削除する
 	Check for an existing copy	既存のコピーを確認する
+	Automatically adopt existing portable copies	既存のポータブルコピーを自動的に取り込む

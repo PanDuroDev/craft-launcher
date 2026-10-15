@@ -1337,6 +1337,18 @@ pub mod windows {
         app.stems().map(|s| dir.join(format!("{s}.exe"))).find(|p| p.is_file())
     }
 
+    /// The installed version, read from the portable CLI without running the app
+    /// itself: `<stem>-cli.exe --version` with a short timeout. `None` when the CLI
+    /// is missing, slow, or says something unexpected — the record then carries an
+    /// unknown version like any detection that couldn't read one.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn cli_version(app: &CraftApp, dir: &Path) -> Option<artcraft_launcher_core::version::Version> {
+        let bin = app.stems().map(|s| dir.join(format!("{s}-cli.exe"))).find(|p| p.is_file())?;
+        let path = bin.to_str()?;
+        let out = crate::process::capture(path, &["--version"], std::time::Duration::from_secs(5))?;
+        crate::detect::parse_cli_version(out.trim(), app)
+    }
+
     /// An existing portable copy without a record: its folder, when exactly one of the
     /// expected places (the default and the configured root) holds this app's exe.
     /// Anything else explains itself as an error naming what to remove by hand.
