@@ -1,6 +1,6 @@
 //! What the UI knows about each app.
 
-use artcraft_launcher_core::platform::{Platform, pick_asset};
+use artcraft_launcher_core::platform::{PackageKind, Platform, pick_asset};
 use artcraft_launcher_core::protocol::{JobPhase, LatestRelease, PausedDownload};
 use artcraft_launcher_core::release::Release;
 use artcraft_launcher_core::status::{self, AppStatus, Latest};
@@ -67,12 +67,16 @@ impl AppEntry {
         Some(installed.kind.map(|k| k.label()).unwrap_or(installed.source.label()))
     }
 
-    /// What `Install` would download now: the first platform format with a published
-    /// asset in the latest release. A label only; the backend decides the real one.
-    pub fn planned_kind_label(&self, platform: Option<Platform>) -> Option<&'static str> {
+    /// What `Install` would download now: the first preferred format with a published
+    /// asset in the latest release, else the platform default. A label only; the backend
+    /// (which also probes the system) decides the real one.
+    pub fn planned_kind_label(&self, platform: Option<Platform>, preferred: &[PackageKind]) -> Option<&'static str> {
         let (release, platform) = (self.release()?, platform?);
         let stems: Vec<&str> = self.app.stems().collect();
-        pick_asset(release, &stems, platform, platform.download_kinds()).map(|(_, kind)| kind.label())
+        let mut kinds: Vec<PackageKind> = preferred.iter().copied().filter(|k| platform.download_kinds().contains(k)).collect();
+        let rest: Vec<PackageKind> = platform.download_kinds().iter().copied().filter(|k| !kinds.contains(k)).collect();
+        kinds.extend(rest);
+        kinds.into_iter().find_map(|k| pick_asset(release, &stems, platform, &[k]).map(|(_, kind)| kind.label()))
     }
 
     pub fn latest_label(&self) -> Option<String> {
