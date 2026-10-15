@@ -838,6 +838,7 @@ impl LauncherUi {
                 }
                 ui.separator();
                 if ui.button(RichText::new(tl!("Uninstall…")).color(Tokens::get(ui.ctx()).bad)).clicked() {
+                    self.uninstall_complete = false;
                     self.dialog = Some(Dialog::ConfirmUninstall(id.clone()));
                     ui.close();
                 }

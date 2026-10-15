@@ -104,6 +104,18 @@ pub fn find_kept(paths: &Paths, app_id: &str) -> Option<PathBuf> {
     (files.len() == 1).then(|| files.pop()).flatten()
 }
 
+/// Deletes the retained installer for a complete removal: the whole `.kept/<app>`
+/// folder, which is launcher-owned cache (never user files). A missing folder is
+/// already gone.
+pub(crate) fn remove_kept(paths: &Paths, app_id: &str) -> Result<(), String> {
+    let dir = kept_dir(paths, app_id);
+    if !dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("couldn't remove the saved installer for {app_id} ({e})"))?;
+    Ok(())
+}
+
 /// Keeps `file` as the next delta base, pruning anything previously kept. Best-effort: a
 /// retention failure must never fail the install that just succeeded.
 pub fn retain_installer(paths: &Paths, app_id: &str, file: &Path) {
@@ -239,6 +251,22 @@ mod tests {
         // A stray second file disables the delta base rather than confusing it.
         std::fs::write(kept_dir(&paths, "wordcraft").join("stray.zip"), b"x").unwrap();
         assert_eq!(find_kept(&paths, "wordcraft"), None);
+    }
+
+    #[test]
+    fn kept_bases_go_away_completely() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let src = dir.path().join("dl").join("wordcraft-0.6.1.zip");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"v1").unwrap();
+        retain_installer(&paths, "wordcraft", &src);
+        assert!(find_kept(&paths, "wordcraft").is_some());
+        remove_kept(&paths, "wordcraft").unwrap();
+        assert_eq!(find_kept(&paths, "wordcraft"), None);
+        assert!(!kept_dir(&paths, "wordcraft").exists());
+        // Missing is already gone.
+        remove_kept(&paths, "wordcraft").unwrap();
     }
 
     #[test]

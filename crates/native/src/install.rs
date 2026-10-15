@@ -288,7 +288,8 @@ pub fn managed_elsewhere(app: &CraftApp, installed: &Installed, uninstall: bool)
 }
 
 /// Removes an installed copy. `phase` hears when the removal has to wait for another install;
-/// `stop` cancels it while it waits.
+/// `stop` cancels it while it waits. `complete` also deletes the retained installer
+/// (a portable install's delta base): a complete removal.
 pub fn uninstall(
     app: &CraftApp,
     installed: &Installed,
@@ -296,6 +297,7 @@ pub fn uninstall(
     paths: &Paths,
     stop: &Stop,
     phase: &mut dyn FnMut(JobPhase),
+    complete: bool,
 ) -> Result<(), String> {
     let _ = (record, stop, &phase, paths);
     let path = PathBuf::from(&installed.location);
@@ -312,7 +314,14 @@ pub fn uninstall(
         InstallSource::Msi => windows::uninstall_msi(app, stop, phase),
         #[cfg(windows)]
         InstallSource::Launcher => match record {
-            Some(r) if r.kind == PackageKind::PortableZip => windows::remove_portable(app, r),
+            Some(r) if r.kind == PackageKind::PortableZip => {
+                // The base goes first: it is launcher-owned cache, so its loss strands
+                // nothing; the app's own removal still decides the outcome.
+                if complete {
+                    zip_fetch::remove_kept(paths, app.id)?;
+                }
+                windows::remove_portable(app, r)
+            }
             _ => Err(format!("{} can't be removed from here", installed.source.label())),
         },
         #[cfg(target_os = "macos")]
@@ -2087,6 +2096,42 @@ mod tests {
         let stray = Record { path: elsewhere.join("wordcraft.exe"), ..record.clone() };
         assert!(windows::remove_portable(app, &stray).is_err());
         assert!(elsewhere.exists());
+    }
+
+    #[test]
+    fn portable_complete_removal_takes_the_kept_base_with_it() {
+        use crate::manifest::Record;
+        let app = CraftApp::by_id("wordcraft").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        for complete in [false, true] {
+            let home = dir.path().join(if complete { "Full" } else { "Keep" });
+            std::fs::create_dir(&home).unwrap();
+            std::fs::write(home.join("wordcraft.exe"), "x").unwrap();
+            let base = dir.path().join("base.zip");
+            std::fs::write(&base, "x").unwrap();
+            crate::zip_fetch::retain_installer(&paths, app.id, &base);
+            let record = Record {
+                version: "0.5.0".into(),
+                kind: PackageKind::PortableZip,
+                path: home.join("wordcraft.exe"),
+                installed_at: 1,
+                files: vec![],
+                needs_root: false,
+                root: Some(home.clone()),
+            };
+            let installed = Installed {
+                version: None,
+                source: InstallSource::Launcher,
+                location: home.join("wordcraft.exe").display().to_string(),
+                package: None,
+            };
+            let stop = Stop::default();
+            let mut phase = |_: JobPhase| {};
+            uninstall(app, &installed, Some(&record), &paths, &stop, &mut phase, complete).unwrap();
+            assert!(!home.exists());
+            assert_eq!(crate::zip_fetch::find_kept(&paths, app.id).is_some(), !complete);
+        }
     }
 
     #[test]

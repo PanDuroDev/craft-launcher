@@ -27,6 +27,9 @@ pub enum Command {
     },
     Uninstall {
         app: String,
+        /// Also delete the retained installer (a portable install's delta base):
+        /// a complete removal. Off is an ordinary uninstall, keeping it.
+        complete: bool,
     },
     Launch {
         app: String,

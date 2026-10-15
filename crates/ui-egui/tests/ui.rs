@@ -620,6 +620,43 @@ fn the_uninstall_prompt_keeps_its_own_size_after_a_taller_dialog() {
     assert!(h.query_by_label("Uninstall").is_none());
 }
 
+#[cfg(windows)]
+#[test]
+fn complete_removal_is_a_toggle_not_a_second_button() {
+    // A launcher-managed install offers the toggle; it defaults off and sends its flag.
+    let ev = vec![Event::Detected {
+        app: "photocraft".into(),
+        installed: Some(Installed {
+            version: version::parse("0.4.1"),
+            source: InstallSource::Launcher,
+            location: "C:\\Apps\\PhotoCraft\\photocraft.exe".into(),
+            package: None,
+        }),
+    }];
+    let (mut h, sent) = harness_with(ev, ViewMode::Grid, egui::Theme::Dark, true, 1.0);
+    h.run_steps(4);
+    if let Some(l) = h.state_mut().as_mut() {
+        l.settings.filter = artcraft_launcher_ui_egui::settings::Filter::Installed;
+    }
+    let uninstall_with = |h: &mut Harness<'_, Option<LauncherUi>>, toggle: bool| {
+        h.run_steps(4);
+        h.get_all_by_label("…").next().unwrap().click();
+        h.run_steps(3);
+        h.get_by_label("Uninstall…").click();
+        h.run_steps(4);
+        if toggle {
+            h.get_by_label("Also delete the saved installer").click();
+            h.run_steps(2);
+        }
+        h.get_by_label("Uninstall").click();
+        h.run_steps(2);
+    };
+    uninstall_with(&mut h, false);
+    assert!(sent.borrow().iter().any(|c| matches!(c, Command::Uninstall { complete: false, .. })), "{:?}", sent.borrow());
+    uninstall_with(&mut h, true);
+    assert!(sent.borrow().iter().any(|c| matches!(c, Command::Uninstall { complete: true, .. })), "{:?}", sent.borrow());
+}
+
 #[test]
 fn links_to_the_website_github_and_each_apps_pages() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);

@@ -162,13 +162,19 @@ impl LauncherUi {
             _ => tl!("The app will be removed. Your documents and settings stay."),
         };
         ui.label(RichText::new(how).color(t.muted));
+        // A complete removal also deletes the saved installer copy. Only portable
+        // installs keep one, so only they are offered it.
+        if cfg!(windows) && matches!(entry.installed.as_ref().map(|i| i.source), Some(artcraft_launcher_core::InstallSource::Launcher)) {
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.uninstall_complete, tl!("Also delete the saved installer"));
+        }
         ui.add_space(20.0);
         let mut close = false;
         // A row: a right-to-left layout straight in the column would fill the height left.
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::button(ui, tl!("Uninstall"), Kind::Danger, 110.0).clicked() {
-                    self.send(Command::Uninstall { app: id.to_string() });
+                    self.send(Command::Uninstall { app: id.to_string(), complete: self.uninstall_complete });
                     close = true;
                 }
                 if widgets::button(ui, tl!("Cancel"), Kind::Secondary, 90.0).clicked() {

@@ -310,7 +310,7 @@ impl NativeBackend {
         });
     }
 
-    fn start_job(&self, app_id: &str, uninstall: bool) {
+    fn start_job(&self, app_id: &str, uninstall: bool, complete: bool) {
         let Some(app) = CraftApp::by_id(app_id) else { return };
         log::info!("{}: starting {} job", app.name, if uninstall { "uninstall" } else { "install/update" });
         let stop = Arc::new(Stop::default());
@@ -342,12 +342,12 @@ impl NativeBackend {
                 shared.emit(Event::Progress { app: app.id.to_string(), phase: JobPhase::Removing });
                 let mut phase = |phase| shared.emit(Event::Progress { app: app.id.to_string(), phase });
                 match &existing {
-                    Some(inst) => install::uninstall(app, inst, record.as_ref(), &paths, &stop, &mut phase).map(|()| {
+                    Some(inst) => install::uninstall(app, inst, record.as_ref(), &paths, &stop, &mut phase, complete).map(|()| {
                         let mut m = shared.manifest.lock().unwrap_or_else(PoisonError::into_inner);
                         if m.apps.remove(app.id).is_some() {
                             let _ = m.save(&paths.manifest());
                         }
-                        format!("{} was removed", app.name)
+                        if complete { format!("{} was completely removed", app.name) } else { format!("{} was removed", app.name) }
                     }),
                     None => Err(format!("{} isn't installed", app.name)),
                 }
@@ -924,8 +924,8 @@ impl Backend for NativeBackend {
         match command {
             Command::CheckForUpdates { force } => self.check(force),
             Command::Detect => self.detect_all(),
-            Command::Install { app } => self.start_job(&app, false),
-            Command::Uninstall { app } => self.start_job(&app, true),
+            Command::Install { app } => self.start_job(&app, false, false),
+            Command::Uninstall { app, complete } => self.start_job(&app, true, complete),
             Command::Pause { app } => {
                 if let Some(stop) = self.shared.jobs.lock().unwrap_or_else(PoisonError::into_inner).get(&app) {
                     stop.pause();

@@ -119,6 +119,9 @@ pub struct LauncherUi {
     pub(crate) search: String,
     pub(crate) toasts: Vec<Toast>,
     pub(crate) dialog: Option<Dialog>,
+    /// The uninstall dialog's "also delete the saved installer" toggle. Reset every
+    /// time the dialog opens, so a previous choice never leaks into the next removal.
+    pub(crate) uninstall_complete: bool,
     /// The app whose details drawer is open (or closing: see `detail_shown`).
     pub(crate) detail: Option<String>,
     /// The app the drawer is drawn for: it outlives `detail` while the drawer slides out.
@@ -192,6 +195,7 @@ impl LauncherUi {
             search: String::new(),
             toasts: Vec::new(),
             dialog: None,
+            uninstall_complete: false,
             detail: None,
             detail_shown: None,
             detail_shot: 0,
