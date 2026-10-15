@@ -480,9 +480,18 @@ impl LauncherUi {
             if let Some(f) = entry.failure() {
                 r.on_hover_text(fmt(tl!("Couldn't check for updates: {f}"), &[("f", f)]));
             }
+            // What it is: the installed format, else what Install would download.
+            let format = match &entry.installed {
+                Some(_) => entry.installed_kind_label(),
+                None => entry.planned_kind_label(self.platform),
+            };
+            if let Some(format) = format {
+                ui.add_space(6.0);
+                widgets::badge(ui, format, t.faint);
+            }
         });
         ui.add_space(4.0);
-        ui.label(RichText::new(version_line(&entry, &status, self.platform)).size(12.5).color(t.muted));
+        ui.label(RichText::new(version_line(&entry, &status)).size(12.5).color(t.muted));
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| self.actions(ui, &entry, &status, inner.width()));
         });
@@ -516,6 +525,7 @@ impl LauncherUi {
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::remainder().at_least(220.0).clip(true))
                 .column(Column::exact(176.0))
+                .column(Column::exact(150.0))
                 .column(Column::exact(84.0))
                 .column(Column::exact(84.0))
                 .column(Column::exact(104.0))
@@ -524,6 +534,7 @@ impl LauncherUi {
                     for (key, label) in [
                         (Some(SortKey::Name), tl!("App")),
                         (Some(SortKey::Status), tl!("Status")),
+                        (None, tr_ctx(current(), "column", "Format")),
                         (Some(SortKey::Installed), tr_ctx(current(), "column", "Installed")),
                         (Some(SortKey::Latest), tr_ctx(current(), "column", "Latest")),
                         (Some(SortKey::Released), tr_ctx(current(), "column", "Released")),
@@ -618,25 +629,30 @@ impl LauncherUi {
                                 }
                             });
                             row.col(|ui| {
-                                let text = match (&entry.installed, entry.installed_label()) {
-                                    (Some(_), Some(v)) => {
-                                        format!("{v}{}", entry.installed_kind_label().map(|k| format!(" · {k}")).unwrap_or_default())
-                                    }
-                                    _ => "—".into(),
+                                // What it is: the installed format, else what Install would download.
+                                let format = match &entry.installed {
+                                    Some(_) => entry.installed_kind_label(),
+                                    None => entry.planned_kind_label(self.platform),
                                 };
-                                let color = if entry.installed.is_some() { t.ink } else { t.faint };
-                                ui.label(RichText::new(text).family(egui::FontFamily::Monospace).color(color));
+                                match format {
+                                    Some(format) => {
+                                        widgets::badge(ui, format, t.faint);
+                                    }
+                                    None => {
+                                        ui.label(RichText::new("—").color(t.faint));
+                                    }
+                                }
+                            });
+                            row.col(|ui| {
+                                let installed = entry.installed_label();
+                                let color = if installed.is_some() { t.ink } else { t.faint };
+                                ui.label(RichText::new(installed.unwrap_or_else(|| "—".into())).family(egui::FontFamily::Monospace).color(color));
                             });
                             row.col(|ui| {
                                 let c = if status == AppStatus::UpdateAvailable { t.warn } else { t.ink };
-                                let text = match (entry.installed.is_some(), entry.latest_label()) {
-                                    (false, Some(v)) => {
-                                        format!("{v}{}", entry.planned_kind_label(self.platform).map(|k| format!(" · {k}")).unwrap_or_default())
-                                    }
-                                    (_, Some(v)) => v,
-                                    _ => "—".into(),
-                                };
-                                ui.label(RichText::new(text).family(egui::FontFamily::Monospace).color(c));
+                                ui.label(
+                                    RichText::new(entry.latest_label().unwrap_or_else(|| "—".into())).family(egui::FontFamily::Monospace).color(c),
+                                );
                             });
                             row.col(|ui| {
                                 let when = entry.release().and_then(|r| r.published_at);
@@ -918,15 +934,12 @@ fn sort_label(k: SortKey) -> &'static str {
     }
 }
 
-/// "0.4.1 installed → 0.5.0 released · Oct 8, 2026" and friends, with the install
-/// format behind the version it describes: the installed format after an installed
-/// version, what `Install` would download after a version that isn't installed.
-/// Technical labels (`Portable (.zip)`) stay untranslated, like file names.
-pub(crate) fn version_line(e: &AppEntry, status: &AppStatus, platform: Option<artcraft_launcher_core::platform::Platform>) -> String {
+/// "0.4.1 installed → 0.5.0 released · Oct 8, 2026" and friends.
+pub(crate) fn version_line(e: &AppEntry, status: &AppStatus) -> String {
     let released = e.release().and_then(|r| r.published_at).map(|at| format!(" · {}", date_text(at))).unwrap_or_default();
     let inst_ver = e.installed.as_ref().and_then(|i| i.version.as_ref().map(ToString::to_string));
     let latest = e.latest_label();
-    let base = match (status, inst_ver.as_deref(), latest.as_deref()) {
+    match (status, inst_ver.as_deref(), latest.as_deref()) {
         (AppStatus::UpdateAvailable, Some(i), Some(l)) => {
             format!("{}{released}", fmt(tl!("{version} installed → {latest} released"), &[("version", i), ("latest", l)]))
         }
@@ -938,13 +951,7 @@ pub(crate) fn version_line(e: &AppEntry, status: &AppStatus, platform: Option<ar
         (_, None, Some(l)) => format!("{}{released}", fmt(tl!("Version {latest}"), &[("latest", l)])),
         (AppStatus::NoRelease, None, None) => tl!("No release published yet").to_string(),
         _ => " ".to_string(),
-    };
-    let suffix = match (&e.installed, status) {
-        (Some(_), _) => e.installed_kind_label().map(|k| format!(" · {k}")).unwrap_or_default(),
-        (None, AppStatus::Available) => e.planned_kind_label(platform).map(|k| format!(" · {k}")).unwrap_or_default(),
-        _ => String::new(),
-    };
-    format!("{base}{suffix}")
+    }
 }
 
 /// The launcher's own download for this platform. `flatpak` is whether this copy runs as a
