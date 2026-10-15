@@ -1572,24 +1572,48 @@ pub mod windows {
         Ok(exe)
     }
 
+    /// Places the launcher never deletes from, even when a record points there: drive
+    /// roots, inside the Windows folder or Program Files, and the profile root itself.
+    /// Portable installs never live in any of these (MSI territory or nonsense).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn is_protected(dir: &Path) -> bool {
+        if dir.parent().is_none() {
+            return true;
+        }
+        for var in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(sys) = std::env::var_os(var)
+                && dir.starts_with(&sys)
+            {
+                return true;
+            }
+        }
+        std::env::var_os("USERPROFILE").is_some_and(|profile| dir == Path::new(&profile))
+    }
+
     /// Removes a portable install the launcher owns: the Start Menu shortcut and the install
-    /// folder. Only the folder the install record pins (or, for records from before the
-    /// install location was choosable, the default one): anything else is left alone, so a
-    /// stray record can never delete user files.
+    /// folder. The folder is the install record's root; records without one (older records,
+    /// or a build that dropped it) fall back to the exe's own folder when it is a real,
+    /// unprotected folder, else the default one. Anything else is left alone, so a stray
+    /// record can never delete user files — and settings play no part: removal follows
+    /// only what is on disk and in the record.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn remove_portable(app: &CraftApp, record: &Record) -> Result<(), String> {
         if record.kind != PackageKind::PortableZip {
             return Err(format!("{} isn't a portable install", app.name));
         }
-        let allowed = record.root.clone().or_else(|| portable_dir(app, &InstallRoot::Default));
         let exe = PathBuf::from(&record.path);
+        let fallback = exe.parent().filter(|p| p.is_dir() && !is_protected(p)).map(Path::to_path_buf);
+        let allowed = record.root.clone().or(fallback).or_else(|| portable_dir(app, &InstallRoot::Default));
         if allowed.as_deref() != exe.parent() || !allowed.as_deref().is_some_and(|d| d.is_dir()) {
             return Err(format!("{} isn't where its portable install should be; it was left alone", app.name));
+        }
+        let dir = allowed.ok_or_else(|| format!("{} isn't where its portable install should be; it was left alone", app.name))?;
+        if is_protected(&dir) {
+            return Err(format!("{} points at a protected system folder; it was left alone", app.name));
         }
         if let Some(lnk) = shortcut_path(app) {
             let _ = std::fs::remove_file(&lnk);
         }
-        let dir = allowed.ok_or_else(|| format!("{} isn't where its portable install should be; it was left alone", app.name))?;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("couldn't remove {} ({e})", dir.display()))?;
         Ok(())
     }
@@ -2063,6 +2087,42 @@ mod tests {
         let stray = Record { path: elsewhere.join("wordcraft.exe"), ..record.clone() };
         assert!(windows::remove_portable(app, &stray).is_err());
         assert!(elsewhere.exists());
+    }
+
+    #[test]
+    fn portable_removal_survives_a_lost_root() {
+        use crate::manifest::Record;
+        let app = CraftApp::by_id("wordcraft").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("WordCraft");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("wordcraft.exe"), "x").unwrap();
+        // A record without a root (older records, or a build that dropped it): the
+        // exe's own folder is proof enough — settings play no part.
+        let record = Record {
+            version: "0.5.0".into(),
+            kind: PackageKind::PortableZip,
+            path: home.join("wordcraft.exe"),
+            installed_at: 1,
+            files: vec![],
+            needs_root: false,
+            root: None,
+        };
+        windows::remove_portable(app, &record).unwrap();
+        assert!(!home.exists());
+    }
+
+    #[test]
+    fn protected_folders_are_never_removed() {
+        assert!(windows::is_protected(Path::new("/")));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!windows::is_protected(dir.path()));
+        #[cfg(windows)]
+        {
+            let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap();
+            assert!(windows::is_protected(&system));
+            assert!(windows::is_protected(&system.join("System32")));
+        }
     }
 
     #[test]
