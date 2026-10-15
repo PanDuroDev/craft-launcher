@@ -60,6 +60,10 @@ pub fn install(
         return Err(format!("{} is running. Quit it, then try again.", app.name));
     }
     log::info!("{}: starting {} to {} ({})", app.name, if existing.is_some() { "update" } else { "install" }, release.version_label(), kind.label());
+    // Portable only: refuse an unusable or unwritable destination before any bytes travel.
+    if kind == PackageKind::PortableZip {
+        windows::check_portable_dest(app, &job.install_root, previous)?;
+    }
     let file = download(release, asset, kind, app.id, job)?;
     log::info!("{}: download ready ({}), running installer...", app.name, file.display());
     // Past this point the install can't be interrupted halfway.
@@ -1455,6 +1459,21 @@ pub mod windows {
         previous_root.map(Path::to_path_buf).or_else(|| portable_dir(app, root))
     }
 
+    /// Fails fast before anything is downloaded: the effective destination (the record's
+    /// root for updates, else the setting) must be one the launcher may use, and must be
+    /// writable. Idempotent: safe to repeat inside `install_portable` after the download.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn check_portable_dest(app: &CraftApp, root: &InstallRoot, previous: Option<&Record>) -> Result<PathBuf, String> {
+        let previous_root = previous.and_then(|r| r.root.as_deref());
+        let dest = portable_dest(app, root, previous_root)
+            .ok_or("can't use that folder for installs: pick an absolute path that exists or can be created")?;
+        if !dest_is_ours(&dest, previous_root) {
+            return Err(format!("{} already has files the launcher didn't install; pick an empty folder", dest.display()));
+        }
+        std::fs::create_dir_all(&dest).map_err(|e| format!("can't write to {} ({e}): pick another folder", dest.display()))?;
+        Ok(dest)
+    }
+
     /// Installs a portable zip. New install path (MSI stays the default): the zip's
     /// directory is validated before anything is unpacked, then it unpacks to staging,
     /// flattens the zip's single versioned top folder away, swaps the result into
@@ -1465,12 +1484,7 @@ pub mod windows {
     /// install lives even when the configured location changed since. Returns the installed exe.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn install_portable(app: &CraftApp, file: &Path, root: &InstallRoot, previous: Option<&Record>, stop: &Stop) -> Result<PathBuf, String> {
-        let previous_root = previous.and_then(|r| r.root.as_deref());
-        let dest = portable_dest(app, root, previous_root)
-            .ok_or("can't use that folder for installs: pick an absolute path that exists or can be created")?;
-        if !dest_is_ours(&dest, previous_root) {
-            return Err(format!("{} already has files the launcher didn't install; pick an empty folder", dest.display()));
-        }
+        let dest = check_portable_dest(app, root, previous)?;
         // The checksum already passed: this rejects a hostile or broken zip before it can
         // write outside its folder (a delta-assembled file is checked here too).
         zip_fetch::read_local_cd(file).map_err(|e| format!("the download isn't a usable portable zip ({e})"))?;
@@ -2016,6 +2030,33 @@ mod tests {
         // A missing previous folder is recreated in place, not moved to the setting.
         assert!(!old_root.exists());
         assert_eq!(windows::portable_dest(app, &setting, Some(&old_root)), Some(old_root));
+    }
+
+    #[test]
+    fn portable_preflight_refuses_before_any_download() {
+        use artcraft_launcher_core::protocol::InstallRoot;
+        let app = CraftApp::by_id("wordcraft").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // An occupied foreign folder: refused, untouched (no staging started).
+        let lived_in = dir.path().join("trap").join("WordCraft");
+        std::fs::create_dir_all(&lived_in).unwrap();
+        std::fs::write(lived_in.join("mine.txt"), "x").unwrap();
+        let err = windows::check_portable_dest(app, &InstallRoot::Custom(dir.path().join("trap")), None).unwrap_err();
+        assert!(err.contains("already has files"), "{err}");
+        assert_eq!(std::fs::read(lived_in.join("mine.txt")).unwrap(), b"x");
+        assert!(!dir.path().join("trap").join("WordCraft.new").exists(), "no staging started");
+        // Unwritable (a file where folders should be): a clear message on every system.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let err = windows::check_portable_dest(app, &InstallRoot::Custom(blocker.join("sub")), None).unwrap_err();
+        assert!(err.contains("can't write to"), "{err}");
+        // No usable root at all: refused, not silently replaced.
+        let err = windows::check_portable_dest(app, &InstallRoot::Custom(PathBuf::new()), None).unwrap_err();
+        assert!(err.contains("can't use that folder"), "{err}");
+        // A fresh folder passes and is created.
+        let dest = windows::check_portable_dest(app, &InstallRoot::Custom(dir.path().join("fresh")), None).unwrap();
+        assert_eq!(dest, dir.path().join("fresh").join("WordCraft"));
+        assert!(dest.is_dir());
     }
 
     #[test]
