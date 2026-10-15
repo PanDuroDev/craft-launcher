@@ -341,7 +341,7 @@ impl NativeBackend {
             let result = if uninstall {
                 shared.emit(Event::Progress { app: app.id.to_string(), phase: JobPhase::Removing });
                 let mut phase = |phase| shared.emit(Event::Progress { app: app.id.to_string(), phase });
-                match &existing {
+                let outcome = match &existing {
                     Some(inst) => install::uninstall(app, inst, record.as_ref(), &paths, &stop, &mut phase, complete).map(|()| {
                         let mut m = shared.manifest.lock().unwrap_or_else(PoisonError::into_inner);
                         if m.apps.remove(app.id).is_some() {
@@ -350,7 +350,14 @@ impl NativeBackend {
                         if complete { format!("{} was completely removed", app.name) } else { format!("{} was removed", app.name) }
                     }),
                     None => Err(format!("{} isn't installed", app.name)),
-                }
+                };
+                // Uninstalls never logged their outcome: the next "it said an error but
+                // the log shows nothing" mystery ends here.
+                match &outcome {
+                    Ok(msg) => log::info!("{msg}"),
+                    Err(e) => log::error!("couldn't remove {}: {e}", app.name),
+                };
+                outcome
             } else {
                 let r = run_install(app, &shared, &paths, http.as_ref(), platform, &options, existing.as_ref(), record.as_ref(), &stop);
                 // Stopped by the connection rather than by the user: say so, and how to go on.
