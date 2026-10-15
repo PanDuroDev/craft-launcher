@@ -487,7 +487,7 @@ impl LauncherUi {
             };
             if let Some(format) = format {
                 ui.add_space(6.0);
-                widgets::badge(ui, format, t.faint);
+                widgets::badge(ui, format, widgets::tone_color(&t, tone));
             }
         });
         ui.add_space(4.0);
@@ -636,7 +636,8 @@ impl LauncherUi {
                                 };
                                 match format {
                                     Some(format) => {
-                                        widgets::badge(ui, format, t.faint);
+                                        let (_, tone) = model::entry_status_text(&entry, &status, self.caps.manage_apps);
+                                        widgets::badge(ui, format, widgets::tone_color(&t, tone));
                                     }
                                     None => {
                                         ui.label(RichText::new("—").color(t.faint));
