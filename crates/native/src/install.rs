@@ -1445,17 +1445,30 @@ pub mod windows {
         }
     }
 
+    /// Where `app`'s portable copy goes: the previous install's own root when there is
+    /// one, else the configured location. Updates stay where the app is even when the
+    /// setting moved on since (it governs new installs); a record without a root (from
+    /// before the location was choosable) falls back to the setting, and a missing
+    /// previous folder is simply recreated in place.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn portable_dest(app: &CraftApp, root: &InstallRoot, previous_root: Option<&Path>) -> Option<PathBuf> {
+        previous_root.map(Path::to_path_buf).or_else(|| portable_dir(app, root))
+    }
+
     /// Installs a portable zip. New install path (MSI stays the default): the zip's
     /// directory is validated before anything is unpacked, then it unpacks to staging,
     /// flattens the zip's single versioned top folder away, swaps the result into
     /// `%LOCALAPPDATA%\Programs\<App>` (the new copy fully in place before the old one goes),
     /// and writes a Start Menu shortcut (a shortcut failure only warns: the app runs fine
     /// without it). A folder holding files the launcher didn't install is refused, unless
-    /// it is the previous install's own root. Returns the installed exe.
+    /// it is the previous install's own root. An update goes back where the previous
+    /// install lives even when the configured location changed since. Returns the installed exe.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn install_portable(app: &CraftApp, file: &Path, root: &InstallRoot, previous: Option<&Record>, stop: &Stop) -> Result<PathBuf, String> {
-        let dest = portable_dir(app, root).ok_or("can't use that folder for installs: pick an absolute path that exists or can be created")?;
-        if !dest_is_ours(&dest, previous.and_then(|r| r.root.as_deref())) {
+        let previous_root = previous.and_then(|r| r.root.as_deref());
+        let dest = portable_dest(app, root, previous_root)
+            .ok_or("can't use that folder for installs: pick an absolute path that exists or can be created")?;
+        if !dest_is_ours(&dest, previous_root) {
             return Err(format!("{} already has files the launcher didn't install; pick an empty folder", dest.display()));
         }
         // The checksum already passed: this rejects a hostile or broken zip before it can
@@ -1987,6 +2000,22 @@ mod tests {
         assert!(windows::dest_is_ours(&lived_in, Some(&lived_in)));
         let other = dir.path().join("other");
         assert!(!windows::dest_is_ours(&lived_in, Some(&other)));
+    }
+
+    #[test]
+    fn portable_updates_follow_the_record_not_the_setting() {
+        use artcraft_launcher_core::protocol::InstallRoot;
+        let app = CraftApp::by_id("wordcraft").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old_root = dir.path().join("Old");
+        let setting = InstallRoot::Custom(dir.path().join("New"));
+        // A previous install pins its folder: the changed setting is ignored.
+        assert_eq!(windows::portable_dest(app, &setting, Some(&old_root)), Some(old_root.clone()));
+        // No record: the setting decides.
+        assert_eq!(windows::portable_dest(app, &setting, None), Some(dir.path().join("New").join("WordCraft")));
+        // A missing previous folder is recreated in place, not moved to the setting.
+        assert!(!old_root.exists());
+        assert_eq!(windows::portable_dest(app, &setting, Some(&old_root)), Some(old_root));
     }
 
     #[test]
