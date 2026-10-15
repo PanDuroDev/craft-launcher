@@ -32,7 +32,12 @@ impl Backend for Fake {
         std::mem::take(&mut self.events)
     }
     fn capabilities(&self) -> Capabilities {
-        Capabilities { manage_apps: self.manage, reveal_label: "Show in Finder", self_update: self.manage }
+        Capabilities {
+            manage_apps: self.manage,
+            reveal_label: "Show in Finder",
+            self_update: self.manage,
+            install_kinds: vec![artcraft_launcher_core::PackageKind::Dmg],
+        }
     }
     fn platform(&self) -> Option<Platform> {
         Some(Platform { os: Os::MacOs, arch: Arch::Arm64 })

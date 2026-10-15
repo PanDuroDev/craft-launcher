@@ -67,14 +67,16 @@ impl AppEntry {
         Some(installed.kind.map(|k| k.label()).unwrap_or(installed.source.label()))
     }
 
-    /// What `Install` would download now: the first preferred format with a published
-    /// asset in the latest release, else the platform default. A label only; the backend
-    /// (which also probes the system) decides the real one.
-    pub fn planned_kind_label(&self, platform: Option<Platform>, preferred: &[PackageKind]) -> Option<&'static str> {
+    /// What `Install` would download now: the preferred formats the backend can install,
+    /// then what it can install, first published asset wins. Empty `installable` (an old
+    /// backend) falls back to the platform's download list. A label only; the backend
+    /// decides the real one at install time.
+    pub fn planned_kind_label(&self, platform: Option<Platform>, preferred: &[PackageKind], installable: &[PackageKind]) -> Option<&'static str> {
         let (release, platform) = (self.release()?, platform?);
         let stems: Vec<&str> = self.app.stems().collect();
-        let mut kinds: Vec<PackageKind> = preferred.iter().copied().filter(|k| platform.download_kinds().contains(k)).collect();
-        let rest: Vec<PackageKind> = platform.download_kinds().iter().copied().filter(|k| !kinds.contains(k)).collect();
+        let base: &[PackageKind] = if installable.is_empty() { platform.download_kinds() } else { installable };
+        let mut kinds: Vec<PackageKind> = preferred.iter().copied().filter(|k| base.contains(k)).collect();
+        let rest: Vec<PackageKind> = base.iter().copied().filter(|k| !kinds.contains(k)).collect();
         kinds.extend(rest);
         kinds.into_iter().find_map(|k| pick_asset(release, &stems, platform, &[k]).map(|(_, kind)| kind.label()))
     }
