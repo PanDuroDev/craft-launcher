@@ -388,7 +388,7 @@ impl LauncherUi {
                         let field = (ui.available_width() - browse - ui.spacing().item_spacing.x).max(60.0);
                         ui.add(
                             egui::TextEdit::singleline(&mut custom)
-                                .hint_text(r"F:\CraftApps")
+                                .hint_text(r"C:\PortableApps")
                                 .desired_width(field)
                                 .min_size(egui::vec2(0.0, theme::CONTROL_H))
                                 .vertical_align(egui::Align::Center)
