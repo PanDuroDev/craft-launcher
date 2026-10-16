@@ -9,7 +9,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Where eframe keeps its state for `app_id`, as it picks it for a window with that app id.
+/// Beside a portable launcher (`portable.txt` next to its exe) that is a data folder next
+/// to it, so the settings travel with the copy; otherwise eframe's own storage folder.
 pub fn path(app_id: &str) -> Option<PathBuf> {
+    if let Some(root) = artcraft_launcher_native::paths::portable_root() {
+        return Some(root.join("app.ron"));
+    }
+
     eframe::storage_dir(app_id).map(|dir| dir.join("app.ron"))
 }
 
@@ -127,5 +133,12 @@ mod tests {
         assert!(std::fs::create_dir_all(&dir.0).is_ok());
         assert!(std::fs::write(dir.file(), "not ron {").is_ok());
         assert_eq!(load::<Settings>(&dir.file(), "settings"), None);
+    }
+
+    #[test]
+    fn non_portable_settings_live_where_eframe_keeps_them() {
+        // No portable.txt beside the test binary: the standard eframe location, so a
+        // portable-agnostic build neither moves nor loses anyone's settings.
+        assert_eq!(path("test-app"), eframe::storage_dir("test-app").map(|dir| dir.join("app.ron")));
     }
 }

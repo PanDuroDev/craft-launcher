@@ -204,13 +204,15 @@ pub fn validate_entries(entries: &[Entry]) -> Result<(), String> {
 }
 
 /// A name that cannot escape its folder, collide with a device, or smuggle a stream.
+/// Directory entries end in one slash in real archives; it names no file.
 fn safe_name(name: &str) -> Result<(), String> {
     let normalized = name.replace('\\', "/");
-    if normalized.contains(':') || normalized.starts_with('/') {
+    let trimmed = normalized.strip_suffix('/').unwrap_or(&normalized);
+    if trimmed.contains(':') || trimmed.starts_with('/') {
         return Err("unsafe archive path".into());
     }
     let mut parts = 0;
-    for part in normalized.split('/') {
+    for part in trimmed.split('/') {
         parts += 1;
         if part.is_empty() || part == "." || part == ".." {
             return Err("unsafe archive path".into());
@@ -364,5 +366,22 @@ mod tests {
         // A real published entry passes validation.
         let real = parse_cd(&REAL_ENTRY0, 1).unwrap();
         assert!(validate_entries(&real).is_ok());
+    }
+
+    #[test]
+    fn validation_allows_trailing_slashes_on_folders() {
+        // Real archives list their folders with one trailing slash (VectorCraft 0.12.0).
+        assert!(validate_entries(&[entry("v1/", 0, 0)]).is_ok());
+        assert!(validate_entries(&[entry("v1/sub/", 0, 0)]).is_ok());
+        assert!(validate_entries(&[entry("v1\\", 0, 0)]).is_ok());
+        // Everything else hostile still fails: interior empties, absolutes, escapes,
+        // streams, reserved names, and bare slashes.
+        assert!(validate_entries(&[entry("v1//x", 1, 10)]).is_err(), "empty part");
+        assert!(validate_entries(&[entry("/abs/", 1, 10)]).is_err(), "absolute");
+        assert!(validate_entries(&[entry("../x", 1, 10)]).is_err(), "traversal");
+        assert!(validate_entries(&[entry("C:\\win\\", 1, 10)]).is_err(), "drive letter");
+        assert!(validate_entries(&[entry("dir/CON.txt", 1, 10)]).is_err(), "reserved name");
+        assert!(validate_entries(&[entry("/", 1, 10)]).is_err(), "bare slash");
+        assert!(validate_entries(&[entry("", 1, 10)]).is_err(), "empty");
     }
 }
